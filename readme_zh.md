@@ -1,318 +1,224 @@
+# P1 MuJoCo
 
-# 介绍
-## Unitree mujoco
-`unitree_mujoco` 是基于 `Unitree sdk2` 和 `mujoco` 开发的仿真器。用户使用 `Unitree_sdk2`、 `unitree_ros2` 和 `unitree_sdk2_python` 开发的控制程序可以方便地接入该仿真器，实现仿真到实物的开发流程。仓库别基于 c++ 和 python 实现了两个版本的仿真器， 其结构大致如下图所示:
+这个仓库现在已经不是原版 `unitree_mujoco` 的通用 DDS 仿真入口，而是面向 P1 机器人的 MuJoCo 策略仿真工程。当前主流程是：加载 P1 MJCF 模型，读取 IsaacLab / `robot_deploy-main` 导出的部署配置，加载 TorchScript 策略，在 MuJoCo 里用 MIT PD 计算控制力矩，并直接写入 `data->ctrl`。
 
-![](./doc/func.png)
+主程序是：
+
+```bash
+simulate/build/p1_mujoco_deploy_sim
+```
+
+这个程序不依赖 Unitree SDK、DDS、`p1_ctrl` 或 `g1_ctrl`。
+
+## 主要功能
+
+- P1 / P1 v2 MuJoCo 模型
+- 读取实机部署侧的 deploy YAML
+- 加载 TorchScript 策略模型
+- MuJoCo 内部 MIT PD 力矩控制
+- 人形机器人起步用弹性吊绳
+- 可选电机控制响应延时
+- Xbox / Switch 手柄速度控制
+- 可视化 HUD，显示关节、IMU、控制量等信息
+- 关节运动曲线，支持 `q`、`dq`、`tau`、`ctrl`
+- 电机和踝关节验证脚本
 
 ## 目录结构
-- `simulate`: 基于 unitree_sdk2 和 mujoco (c++) 实现的仿真器（推荐）
-- `simulate_python`: 基于 unitree_sdk2py 和 mujoco (python) 实现的仿真器
-- `unitree_robots`: unitree_sdk2 支持的机器人 mjcf 描述文件
-- `terrain_tool`: 仿真场景地形生成工具
-- `example`: 例程
 
-## 支持的 Unitree sdk2 消息：
-**当前版本仅支持底层开发，主要用于控制器的 sim to real 验证**
-- `LowCmd`: 电机控制指令
-- `LowState`：电机状态
-- `SportModeState`：机器人位置和速度
-- `IMUState`: 胸部IMU数据，话题为 `rt/secondary` (仅 G1)
+- `simulate/`：C++ P1 MuJoCo 主仿真程序
+- `simulate/p1_mujoco_deploy.yaml`：默认运行配置
+- `simulate/src/`：P1 runner、MuJoCo backend、viewer、手柄、策略接口
+- `unitree_robots/p1/`：早期 P1 MJCF 模型
+- `unitree_robots/p1_v2/`：当前默认使用的 P1 v2 MJCF 模型
+- `unitree_robots/p1_ankle_ik_check/`：踝关节运动学检查模型
+- `simulate_python/`：Python 辅助脚本和旧仿真脚本
+- `motor_model_validation/`：电机和踝关节模型验证工具
+- `terrain_tool/`、`example/`：上游 Unitree 工程保留参考
 
-## 消息(DDS idl)类型说明
-- Unitree Go2, B2, H1, B2w, Go2w 型号的机器人使用 unitree_go idl 实现底层通信
-- Unitree G1, H1-2 型号的机器人使用 unitree_hg 实现底层通信
+## 依赖
 
-注：
- 1. 电机的编号与机器人实物一致，具体可参考 [Unitree 文档](https://support.unitree.com/home/zh/developer)
- 2. 在机器人实物上关闭自带的运控服务后， `SportModeState` 消息是无法读取的。仿真中保留了这一消息，便于用户利用位置和速度信息分析所开发的控制程序。
-
-## 相关链接
-- [unitree_sdk2](https://github.com/unitreerobotics/unitree_sdk2)
-- [unitree_sdk2_python](https://github.com/unitreerobotics/unitree_sdk2_python)
-- [unitree_ros2](https://github.com/unitreerobotics/unitree_ros2)
-- [Unitree 文档](https://support.unitree.com/home/zh/developer)
-- [mujoco doc](https://mujoco.readthedocs.io/en/stable/overview.html)
-
-# 安装
-## c++ 仿真器 (simulate)
-### 1. 依赖
+基础依赖：
 
 ```bash
-sudo apt install libyaml-cpp-dev libspdlog-dev libboost-all-dev libglfw3-dev
+sudo apt update
+sudo apt install cmake build-essential libyaml-cpp-dev libglfw3-dev libfmt-dev joystick
 ```
 
-#### unitree_sdk2
-推荐将 `unitree_sdk2` 安装在 `/opt/unitree_robotics` 路径下。
+MuJoCo 建议解压到 `~/.mujoco`，然后在 `simulate/` 下建立软链接：
+
 ```bash
-git clone https://github.com/unitreerobotics/unitree_sdk2.git
-cd unitree_sdk2/
-mkdir build
-cd build
-cmake .. -DCMAKE_INSTALL_PREFIX=/opt/unitree_robotics
-sudo make install
-```
-详细见：https://github.com/unitreerobotics/unitree_sdk2
-#### mujoco
-
-下载mujoco[安装包](https://github.com/google-deepmind/mujoco/releases), 解压到 `~/.mujoco` 目录下;
-
-```
-cd unitree_mujoco/simulate/
+cd /home/hr/gongxunp1/unitree_mujoco/simulate
 ln -s ~/.mujoco/mujoco-3.3.6 mujoco
 ```
 
-### 2. 编译 unitree_mujoco
-```
-cd unitree_mujoco/simulate/
-mkdir build && cd build
-cmake ..
-make -j4
+策略加载复用了 `robot_deploy-main` 里的 `TorchPolicyRunner`：
+
+```text
+robot_deploy-main/src/inference/include/torch_policy_runner.hpp
+robot_deploy-main/src/inference/src/torch_policy_runner.cpp
 ```
 
-### 3. 测试:
-运行：
+默认 `robot_deploy-main` 路径是：
+
+```text
+/home/hr/gongxunp1/robot_deploy-main
+```
+
+如果你的路径不同，编译时用 `-DP1_ROBOT_DEPLOY_ROOT=...` 指定。
+
+## 编译
+
 ```bash
-./unitree_mujoco -r go2 -s scene_terrain.xml
+cd /home/hr/gongxunp1/unitree_mujoco/simulate
+mkdir -p build
+cd build
+cmake .. -DP1_ROBOT_DEPLOY_ROOT=/home/hr/gongxunp1/robot_deploy-main
+make -j$(nproc)
 ```
-可以看到加载了 Go2 机器人的 mujoco 仿真器。
 
-在新的终端中运行：
-```
-./test
-```
-程序会输出机器人在仿真器中的姿态和位置信息，同时机器人的每个电机都会持续输出 1Nm 的转矩。
+编译后主要生成：
 
-**注：** 测试程序发送的是 unitree_go 消息，如果需要测试 G1 机器人，需要修改程序使用 unitree_hg 消息。
-
-## Python 仿真器 (simulate_python)
-### 1. 依赖
-#### unitree_sdk2_python
-```bash
-cd ~
-sudo apt install python3-pip
-git clone https://github.com/unitreerobotics/unitree_sdk2_python.git
-cd unitree_sdk2_python
-pip3 install -e .
+```text
+p1_mujoco_deploy_sim
+p1_ankle_kinematics_check
+jstest
 ```
-如果遇到问题：
-```bash
-Could not locate cyclonedds. Try to set CYCLONEDDS_HOME or CMAKE_PREFIX_PATH
-```
-参考: https://github.com/unitreerobotics/unitree_sdk2_python
 
-#### mujoco-python
-```bash
-pip3 install mujoco
-```
-#### joystick
-```bash
-pip3 install pygame
-```
-### 2. 测试
-```bash
-cd ./simulate_python
-python3 ./unitree_mujoco.py
-```
-在新终端运行
-```bash
-python3 ./test/test_unitree_sdk2.py
-```
-程序会输出机器人在仿真器中的姿态和位置信息，同时机器人的每个电机都会持续输出 1Nm 的转矩。
+## 运行配置
 
-**注：** 测试程序发送的是 unitree_go 消息，如果需要测试 G1 机器人，需要修改程序使用 unitree_hg 消息。
+运行前先检查 [simulate/p1_mujoco_deploy.yaml](./simulate/p1_mujoco_deploy.yaml)：
 
-
- 
-
-# 使用
-## 1. 仿真配置
-### c++ 仿真器
-c++ 仿真器的配置文件位于 `/simulate/config.yaml` 中：
 ```yaml
-# 仿真器加载的机器人名称
-# "go2", "b2", "b2w", "h1"
-robot: "go2"
+model_xml_path: "../unitree_robots/p1_v2/scene.xml"
+deploy_config_path: "/path/to/robot_deploy-main/src/inference/config/deploy.yaml"
+policy_model_path: "/path/to/robot_deploy-main/src/inference/model/policy.pt"
 
-# 机器人仿真仿真场景文件
-# 以 go2 为例，指的是/unitree_robots/go2/文件夹下的 scene.xml 文件
-robot_scene: "scene.xml" 
+joystick:
+  enabled: true
+  type: "xbox"
+  device: "/dev/input/js0"
+  bits: 16
+  deadzone: 0.10
+  limits: [0.50, 0.30, 0.60]
+  signs: [1.0, -1.0, -1.0]
 
-# dds domain id，最好与实物(实物上默认为 0)区分开
-domain_id: 1 
-# 网卡名称, 对于仿真建议使用本地回环 "lo"
-interface: "lo"
+motor_delay:
+  enabled: true
+  min_ms: 0
+  max_ms: 8
 
-# 是否输出机器人连杆、关节、传感器等信息，1为输出
-print_scene_information: 1
-
-# 是否使用虚拟挂带, 1 为启用
-# 主要用于模拟 H1 机器人初始化挂起的过程 
-enable_elastic_band: 0 # For H1 
-```
-### python 仿真器
-python 仿真器的配置文件位于 `/simulate_python/config.py` 中：
-```python
-# 仿真器加载的机器人名称
-# "go2", "b2", "b2w", "h1"
-ROBOT = "go2" 
-
-# 机器人仿真仿真场景文件
-ROBOT_SCENE = "../unitree_robots/" + ROBOT + "/scene.xml" # Robot scene
-
-# dds domain id，最好与实物(实物上默认为 0)区分开
-DOMAIN_ID = 1 # Domain id
-# 网卡名称, 对于仿真建议使用本地回环 "lo"
-INTERFACE = "lo" # Interface 
-
-# 是否输出机器人连杆、关节、传感器等信息，True 为输出
-PRINT_SCENE_INFORMATION = True 
-
-USE_JOYSTICK = 1 # Simulate Unitree WirelessController using a gamepad
-JOYSTICK_TYPE = "xbox" # support "xbox" and "switch" gamepad layout
-JOYSTICK_DEVICE = 0 # Joystick number
-
-# 是否使用虚拟挂带, 1 为启用
-# 主要用于模拟 H1 机器人初始化挂起的过程 
-ENABLE_ELASTIC_BAND = False 
-
-# 仿真步长 单位(s)
-# 为保证仿真的可靠性，需要大于 viewer.sync() 渲染一次所需要的时间
-SIMULATE_DT = 0.003  
-
-# 可视化界面的运行步长，0.02 对应 50fps/s
-VIEWER_DT = 0.02 
+viewer:
+  overlay: true
+  page: "summary"
+  angle_units: "rad"
+  curve: true
+  curve_signal: "q+dq"
+  curve_joint_index: 0
+  curve_window_seconds: 5.0
 ```
 
-### 游戏手柄
-仿真器会使用 Xbox 或者 Switch 游戏来模拟机器人的无线控制器，并将手柄按键和摇杆信息发布在"rt/wireless_controller" topic。如果手上没有可以使用的游戏手柄，需要将 `config.yaml/config.py` 中的 `use_joystick/USE_JOYSTICK` 设置为 0。如果使用的手柄不属于 Xbox 和 Switch 映射，可以在源码中自行修改或添加(可以使用 `jstest` 工具查看按键和摇杆 id)：
+这里的运行参数改完后不需要重新编译，重新运行程序即可。
 
-In `simulate/src/unitree_sdk2_bridge/unitree_sdk2_bridge.cc`: 
-```C++
- if (js_type == "xbox")
-{
-    js_id_.axis["LX"] = 0; // Left stick axis x
-    js_id_.axis["LY"] = 1; // Left stick axis y
-    js_id_.axis["RX"] = 3; // Right stick axis x
-    js_id_.axis["RY"] = 4; // Right stick axis y
-    js_id_.axis["LT"] = 2; // Left trigger
-    js_id_.axis["RT"] = 5; // Right trigger
-    js_id_.axis["DX"] = 6; // Directional pad x
-    js_id_.axis["DY"] = 7; // Directional pad y
-    
-    js_id_.button["X"] = 2;
-    js_id_.button["Y"] = 3;
-    js_id_.button["B"] = 1;
-    js_id_.button["A"] = 0;
-    js_id_.button["LB"] = 4;
-    js_id_.button["RB"] = 5;
-    js_id_.button["SELECT"] = 6;
-    js_id_.button["START"] = 7;
-}
-```
+## 运行
 
-In `simulate_python/unitree_sdk2_bridge.py`: 
-```python
-if js_type == "xbox":
-    self.axis_id = {
-        "LX": 0,  # Left stick axis x
-        "LY": 1,  # Left stick axis y
-        "RX": 3,  # Right stick axis x
-        "RY": 4,  # Right stick axis y
-        "LT": 2,  # Left trigger
-        "RT": 5,  # Right trigger
-        "DX": 6,  # Directional pad x
-        "DY": 7,  # Directional pad y
-    }
+从 build 目录启动：
 
-    self.button_id = {
-        "X": 2,
-        "Y": 3,
-        "B": 1,
-        "A": 0,
-        "LB": 4,
-        "RB": 5,
-        "SELECT": 6,
-        "START": 7,
-    }
-```
-### 人形机器人虚拟挂带
-考虑到人形机器人不便于从平地上启动并进行调试，在仿真中设计了一个虚拟挂带，用于模拟人形机器人的吊起和放下。设置 `enable_elastic_band/ENABLE_ELASTIC_BAND = 1` 可以启用虚拟挂带。加载机器人后，按 `9` 启用或松开挂带，按 `7` 放下机器人，按 `8` 吊起机器人。
-
-## 2. 地形生成工具
-我们提供了一个在 mujoco 仿真器中参数化创建简单地形的工具，支持添加楼梯、杂乱地面、高程图等地形。程序位于 `terrain_tool` 文件夹中。具体的使用方法见 `terrain_tool` 文件夹下的 readme 文件。
-![](./doc/terrain.png)
-
-## 3. sim to real
-`example` 文件夹下提供了使用不同接口实现 Go2 机器人站起再趴下的简单例子。这些例子简演示了如何使用 Unitree 提供的接口实现仿真到实物的实现。下面是每个文件夹名称的解释：
-- `cpp`: 基于 `C++`, 使用 `unitree_sdk2` 接口
-- `python`: 基于 `python`，使用 `unitree_sdk2_python` 接口
-- `ros2`: 基于`ros2`，使用 `unitree_ros2` 接口
-
-### unitree_sdk2 
-1. 编译运行
 ```bash
-cd example/cpp
-mkdir build && cd build
-cmake ..
-make -j4
+cd /home/hr/gongxunp1/unitree_mujoco/simulate/build
+./p1_mujoco_deploy_sim
 ```
-运行：
+
+常用命令：
+
 ```bash
-./stand_go2 # 控制仿真中的机器人 (需确保 Go2 仿真场景已经加载)
-./stand_go2 enp3s0 # 控制机器人实物，其中 enp3s0 为机器人所连接的网卡名称
+./p1_mujoco_deploy_sim --print-config
+./p1_mujoco_deploy_sim --headless --duration 5 --no-joystick --no-motor-delay
+./p1_mujoco_deploy_sim --runner-config ../p1_mujoco_deploy.yaml
+./p1_mujoco_deploy_sim --policy /path/to/policy.pt --deploy-config /path/to/deploy.yaml
 ```
 
-2. sim to real
-```C++
-if (argc < 2)
-{   
-    // 如果没有输入网卡，使用仿真的 domian id 和 网卡(本地)
-    ChannelFactory::Instance()->Init(1, "lo");
-}
-else
-{   
-    // 否则使用指定的网卡
-    ChannelFactory::Instance()->Init(0, argv[1]);
-}
-```
+启动流程：
 
-### unitree_sdk2_python
-1. 运行：
+1. 程序加载 P1 模型和部署配置。
+2. 机器人进入 deploy 默认关节姿态。
+3. 策略接入前，用 MIT PD 保持站姿，可配合弹性吊绳调试。
+4. 界面提示 ready 后，按 `Enter` 接入策略。
+5. 策略接入后，Xbox 手柄速度指令生效。
+
+## 键盘和界面控制
+
+- `Enter`：接入策略
+- `7` / `8`：缩短 / 放长弹性吊绳
+- `R`：启用或关闭弹性吊绳
+- `0`：清零速度指令
+- `H`：回到弹性吊绳站姿保持
+- `Space`：暂停 / 继续
+- `Backspace`：重置到 deploy 初始姿态
+- `Esc`：退出
+- `V`：显示 / 隐藏 HUD
+- `Tab`：切换 HUD 页面
+- `C` / `J` / `I` / `M`：summary / joints / IMU / all 页面
+- `U`：切换弧度 / 角度显示
+- `G`：显示 / 隐藏关节曲线
+- `[` / `]`：切换上一 / 下一个曲线关节
+- `N`：切换曲线信号
+- `X`：清空曲线历史
+- `1` / `2` / `3` / `4`：固定相机视角
+- `F`：骨盆跟随相机
+
+## 手柄
+
+当前支持 Xbox 和 Switch 布局。默认 Xbox 控制方式：
+
+- 左摇杆 Y：`vx`
+- 左摇杆 X：`vy`
+- 右摇杆 X：yaw rate
+
+可以用 `jstest` 检查手柄设备：
+
 ```bash
-python3 ./stand_go2.py # 控制仿真中的机器人 (需确保 Go2 仿真场景已经加载)
-python3 ./stand_go2.py enp3s0 # 控制机器人实物，其中 enp3s0 为机器人所连接的网卡名称
+cd /home/hr/gongxunp1/unitree_mujoco/simulate/build
+./jstest /dev/input/js0
 ```
-2. sim to real
 
-```python
-if len(sys.argv) <2:
-    // 如果没有输入网卡，使用仿真的 domian id 和 网卡(本地)
-    ChannelFactoryInitialize(1, "lo")
-else:
-    // 否则使用指定的网卡
-    ChannelFactoryInitialize(0, sys.argv[1])
-```
-### unitree_ros2
+如果某个方向反了，修改 `simulate/p1_mujoco_deploy.yaml` 里的 `joystick.signs`。
 
-1. 编译安装
-首先确保已经正确配置好 unitree_ros2 环境，见 [unitree_ros2](https://github.com/unitreerobotics/unitree_ros2)。
+## 参数在哪里调
+
+- 刚体质量、惯量、质心、关节轴、关节限位、执行器最大力矩、脚底接触摩擦：`unitree_robots/p1_v2/scene.xml`
+- 策略部署参数，例如关节顺序、默认姿态、action scale、action clip、observation scale、PD 刚度、PD 阻尼、策略周期：`deploy_config_path` 指向的 deploy YAML
+- 运行时路径、手柄、HUD、曲线、电机延时：`simulate/p1_mujoco_deploy.yaml`
+- 电机延时也可以用命令行覆盖：`--motor-delay-min-ms`、`--motor-delay-max-ms`、`--motor-delay`、`--no-motor-delay`
+
+## 调试工具
+
+常用脚本：
+
 ```bash
-source ~/unitree_ros2/setup.sh
-cd example/ros2
-colcon build
+python3 simulate_python/verify_imu_axes.py
+python3 simulate_python/verify_motor_directions.py
+python3 simulate_python/project_gravity.py
+python3 simulate_python/validate_closed_chain_ankle.py
 ```
 
-2. 运行仿真
+电机模型验证：
+
 ```bash
-source ~/unitree_ros2/setup_local.sh # 使用本地网卡
-export ROS_DOMAIN_ID=1 # 修改domain id 与仿真一致
-./install/stand_go2/bin/stand_go2 # 运行
+cd motor_model_validation
+python3 run_mujoco_motor_test.py
+python3 analyze_motor_log.py
 ```
 
-3. 运行实物
-```bash
-source ~/unitree_ros2/setup.sh # 使用机器人连接的网卡
-export ROS_DOMAIN_ID=0 # 使用默认的 domain id 
-./install/stand_go2/bin/stand_go2 # 运行
-```
+## 注意事项
+
+- 当前 C++ runner 编译时使用 `POLICY_V3=0`，对应单帧 45 维观测、5 帧历史，总输入维度是 225。
+- TorchScript 模型必须和 deploy YAML 匹配。二者不匹配时，常见表现是 TorchScript dry-run 或推理时报矩阵维度错误。
+- `simulate/p1_mujoco_deploy.yaml` 里的模型路径和策略路径是本机运行路径，换机器后需要改成对应位置。
+- MuJoCo 日志、build 目录、电机验证结果图表默认不会提交到 Git。
+
+## 上游来源
+
+本项目基于 Unitree 官方 MuJoCo 工程修改：
+
+- https://github.com/unitreerobotics/unitree_mujoco
+- https://github.com/google-deepmind/mujoco
