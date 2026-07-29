@@ -1,0 +1,1 @@
+/home/hr/gongxunp1/unitree_rl_lab/urdf_725_simple/urdf/p1.urdf

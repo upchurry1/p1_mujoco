@@ -1,14 +1,23 @@
-robot: "go2"  # Robot name, "go2", "b2", "b2w", "h1", "go2w", "g1", "h2"
-robot_scene: "scene.xml" # Robot scene, /unitree_robots/[robot]/scene.xml 
+robot: "p1"  # P1 model directory under unitree_robots/
+robot_scene: "scene.xml" # P1 scene XML
 
 domain_id: 1  # Domain id
 interface: "lo" # Interface 
 
-use_joystick: 0 # Simulate Unitree WirelessController using a gamepad
+use_joystick: 1 # Simulate Unitree WirelessController using a gamepad
 joystick_type: "xbox" # support "xbox" and "switch" gamepad layout
 joystick_device: "/dev/input/js0" # Device path
 joystick_bits: 16 # Some game controllers may only have 8-bit accuracy
+joystick_deadzone: 0.08
+joystick_vx_limit: 1.0
+joystick_vy_limit: 0.45
+joystick_yaw_rate_limit: 0.5
+joystick_vx_sign: 1.0
+joystick_vy_sign: -1.0
+joystick_yaw_rate_sign: -1.0
 
-print_scene_information: 1 # Print link, joint and sensors information of robot
+print_scene_information: 1 # Print P1 link, joint and sensor information
 
-enable_elastic_band: 0 # Virtual spring band, used for lifting h1
+enable_elastic_band: 1 # Virtual spring band for lifting P1 during sim2sim
+
+bridge_loop_period_us: 1000

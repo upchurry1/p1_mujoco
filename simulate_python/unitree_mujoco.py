@@ -16,12 +16,20 @@ mj_model = mujoco.MjModel.from_xml_path(config.ROBOT_SCENE)
 mj_data = mujoco.MjData(mj_model)
 
 
+def FindBodyId(model, body_names):
+    for body_name in body_names:
+        try:
+            return model.body(body_name).id
+        except KeyError:
+            continue
+    raise KeyError(f"None of these bodies exist in the model: {body_names}")
+
+
 if config.ENABLE_ELASTIC_BAND:
     elastic_band = ElasticBand()
-    if config.ROBOT == "h1" or config.ROBOT == "g1":
-        band_attached_link = mj_model.body("torso_link").id
-    else:
-        band_attached_link = mj_model.body("base_link").id
+    band_attached_link = FindBodyId(
+        mj_model, ["torso_link", "base_link", "pelvis_link", "pelvis"]
+    )
     viewer = mujoco.viewer.launch_passive(
         mj_model, mj_data, key_callback=elastic_band.MujuocoKeyCallback
     )
@@ -52,10 +60,13 @@ def SimulationThread():
         locker.acquire()
 
         if config.ENABLE_ELASTIC_BAND:
+            mj_data.xfrc_applied[band_attached_link, :] = 0
             if elastic_band.enable:
-                mj_data.xfrc_applied[band_attached_link, :3] = elastic_band.Advance(
-                    mj_data.qpos[:3], mj_data.qvel[:3]
+                force, torque = elastic_band.Advance(
+                    mj_model, mj_data, band_attached_link
                 )
+                mj_data.xfrc_applied[band_attached_link, :3] = force
+                mj_data.xfrc_applied[band_attached_link, 3:] = torque
         mujoco.mj_step(mj_model, mj_data)
 
         locker.release()

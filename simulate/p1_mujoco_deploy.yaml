@@ -1,0 +1,29 @@
+# Runtime defaults for p1_mujoco_deploy_sim.
+# Edit this file and rerun the executable; recompilation is not needed.
+
+model_xml_path: "../unitree_robots/p1_v2/scene.xml"
+deploy_config_path: "/home/hr/gongxunp1/robot_deploy-main/src/inference/config/deploy_tianv2.yaml"
+policy_model_path: "/home/hr/gongxunp1/robot_deploy-main/src/inference/model/policy_tianv2.pt"
+
+joystick:
+  enabled: true
+  type: "xbox"         # xbox or switch
+  device: "/dev/input/js0"
+  bits: 16
+  deadzone: 0.10
+  limits: [0.50, 0.30, 0.60] # vx m/s, vy m/s, yaw rad/s
+  signs: [1.0, -1.0, -1.0]   # flip these if an axis direction is reversed
+
+motor_delay:
+  enabled: true
+  min_ms: 0
+  max_ms: 8
+
+viewer:
+  overlay: true
+  page: "summary"      # summary, joints, imu, all
+  angle_units: "rad"   # rad or deg
+  curve: true
+  curve_signal: "q+dq" # q, dq, tau, ctrl, q+dq, all
+  curve_joint_index: 0 # 0..11, follows P1 real motor order
+  curve_window_seconds: 5.0

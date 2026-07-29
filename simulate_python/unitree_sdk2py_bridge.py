@@ -3,6 +3,7 @@ import numpy as np
 import pygame
 import sys
 import struct
+import math
 
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelPublisher
 
@@ -13,7 +14,7 @@ from unitree_sdk2py.idl.default import unitree_go_msg_dds__WirelessController_
 from unitree_sdk2py.utils.thread import RecurrentThread
 
 import config
-if config.ROBOT=="g1":
+if config.ROBOT in ("g1", "p1"):
     from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_
     from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
     from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowState_ as LowState_default
@@ -39,22 +40,20 @@ class UnitreeSdk2Bridge:
 
         self.num_motor = self.mj_model.nu
         self.dim_motor_sensor = MOTOR_SENSOR_NUM * self.num_motor
-        self.have_imu = False
-        self.have_frame_sensor = False
         self.dt = self.mj_model.opt.timestep
-        self.idl_type = (self.num_motor > NUM_MOTOR_IDL_GO) # 0: unitree_go, 1: unitree_hg
+        self.idl_type = config.ROBOT in ("g1", "p1") or (self.num_motor > NUM_MOTOR_IDL_GO) # 0: unitree_go, 1: unitree_hg
 
         self.joystick = None
 
-        # Check sensor
-        for i in range(self.dim_motor_sensor, self.mj_model.nsensor):
-            name = mujoco.mj_id2name(
-                self.mj_model, mujoco._enums.mjtObj.mjOBJ_SENSOR, i
-            )
-            if name == "imu_quat":
-                self.have_imu_ = True
-            if name == "frame_pos":
-                self.have_frame_sensor_ = True
+        # Sensor order differs between robot XML files, so keep name-based
+        # slices instead of assuming imu/frame sensors follow the motor sensors.
+        self.imu_quat_slice = self.SensorSlice("imu_quat")
+        self.imu_gyro_slice = self.SensorSlice("imu_gyro")
+        self.imu_acc_slice = self.SensorSlice("imu_acc")
+        self.frame_pos_slice = self.SensorSlice("frame_pos")
+        self.frame_vel_slice = self.SensorSlice("frame_vel")
+        self.have_imu_ = self.imu_quat_slice is not None
+        self.have_frame_sensor_ = self.frame_pos_slice is not None
 
         # Unitree sdk2 message
         self.low_state = LowState_default()
@@ -108,6 +107,42 @@ class UnitreeSdk2Bridge:
             "left": 15,
         }
 
+    def SensorSlice(self, name):
+        sensor_id = mujoco.mj_name2id(
+            self.mj_model, mujoco.mjtObj.mjOBJ_SENSOR, name
+        )
+        if sensor_id < 0:
+            return None
+
+        adr = int(self.mj_model.sensor_adr[sensor_id])
+        dim = int(self.mj_model.sensor_dim[sensor_id])
+        return slice(adr, adr + dim)
+
+    def CopySensor(self, sensor_slice, target):
+        if sensor_slice is None:
+            return
+
+        values = self.mj_data.sensordata[sensor_slice]
+        for i in range(min(len(values), len(target))):
+            target[i] = values[i]
+
+    def UpdateImuRpy(self):
+        quat = self.low_state.imu_state.quaternion
+        w = quat[0]
+        x = quat[1]
+        y = quat[2]
+        z = quat[3]
+
+        self.low_state.imu_state.rpy[0] = math.atan2(
+            2 * (w * x + y * z), 1 - 2 * (x * x + y * y)
+        )
+        self.low_state.imu_state.rpy[1] = math.asin(
+            max(-1.0, min(1.0, 2 * (w * y - z * x)))
+        )
+        self.low_state.imu_state.rpy[2] = math.atan2(
+            2 * (w * z + x * y), 1 - 2 * (y * y + z * z)
+        )
+
     def LowCmdHandler(self, msg: LowCmd_):
         if self.mj_data != None:
             for i in range(self.num_motor):
@@ -133,40 +168,11 @@ class UnitreeSdk2Bridge:
                     i + 2 * self.num_motor
                 ]
 
-            if self.have_frame_sensor_:
-
-                self.low_state.imu_state.quaternion[0] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 0
-                ]
-                self.low_state.imu_state.quaternion[1] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 1
-                ]
-                self.low_state.imu_state.quaternion[2] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 2
-                ]
-                self.low_state.imu_state.quaternion[3] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 3
-                ]
-
-                self.low_state.imu_state.gyroscope[0] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 4
-                ]
-                self.low_state.imu_state.gyroscope[1] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 5
-                ]
-                self.low_state.imu_state.gyroscope[2] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 6
-                ]
-
-                self.low_state.imu_state.accelerometer[0] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 7
-                ]
-                self.low_state.imu_state.accelerometer[1] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 8
-                ]
-                self.low_state.imu_state.accelerometer[2] = self.mj_data.sensordata[
-                    self.dim_motor_sensor + 9
-                ]
+            self.CopySensor(self.imu_quat_slice, self.low_state.imu_state.quaternion)
+            if self.have_imu_:
+                self.UpdateImuRpy()
+            self.CopySensor(self.imu_gyro_slice, self.low_state.imu_state.gyroscope)
+            self.CopySensor(self.imu_acc_slice, self.low_state.imu_state.accelerometer)
 
             if self.joystick != None:
                 pygame.event.get()
@@ -225,25 +231,8 @@ class UnitreeSdk2Bridge:
     def PublishHighState(self):
 
         if self.mj_data != None:
-            self.high_state.position[0] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 10
-            ]
-            self.high_state.position[1] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 11
-            ]
-            self.high_state.position[2] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 12
-            ]
-
-            self.high_state.velocity[0] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 13
-            ]
-            self.high_state.velocity[1] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 14
-            ]
-            self.high_state.velocity[2] = self.mj_data.sensordata[
-                self.dim_motor_sensor + 15
-            ]
+            self.CopySensor(self.frame_pos_slice, self.high_state.position)
+            self.CopySensor(self.frame_vel_slice, self.high_state.velocity)
 
         self.high_state_puber.Write(self.high_state)
 
@@ -401,22 +390,51 @@ class ElasticBand:
     def __init__(self):
         self.stiffness = 200
         self.damping = 100
-        self.point = np.array([0, 0, 3])
+        self.anchor_points = np.array([[0.0, 0.18, 3.0], [0.0, -0.18, 3.0]])
+        self.local_attachment_points = np.array(
+            [[0.0, 0.18, 0.35], [0.0, -0.18, 0.35]]
+        )
         self.length = 0
         self.enable = True
 
-    def Advance(self, x, dx):
-        """
-        Args:
-          δx: desired position - current position
-          dx: current velocity
-        """
-        δx = self.point - x
-        distance = np.linalg.norm(δx)
-        direction = δx / distance
-        v = np.dot(dx, direction)
-        f = (self.stiffness * (distance - self.length) - self.damping * v) * direction
-        return f
+    def Advance(self, model, data, body_id):
+        force = np.zeros(3)
+        torque = np.zeros(3)
+        xmat = data.xmat[body_id].reshape(3, 3)
+        body_origin = data.xpos[body_id]
+        body_com = data.xipos[body_id]
+
+        velocity = np.zeros(6)
+        mujoco.mj_objectVelocity(
+            model, data, mujoco.mjtObj.mjOBJ_BODY, body_id, velocity, 0
+        )
+        angular_velocity = velocity[:3]
+        linear_velocity = velocity[3:]
+        rope_stiffness = self.stiffness / len(self.anchor_points)
+        rope_damping = self.damping / len(self.anchor_points)
+
+        for anchor, local_attachment in zip(
+            self.anchor_points, self.local_attachment_points
+        ):
+            attachment = body_origin + xmat @ local_attachment
+            body_offset = attachment - body_origin
+            com_offset = attachment - body_com
+            point_velocity = linear_velocity + np.cross(angular_velocity, body_offset)
+            delta_x = anchor - attachment
+            distance = np.linalg.norm(delta_x)
+            if distance < 1e-6:
+                continue
+
+            direction = delta_x / distance
+            v = np.dot(point_velocity, direction)
+            magnitude = max(
+                0.0, rope_stiffness * (distance - self.length) - rope_damping * v
+            )
+            rope_force = magnitude * direction
+            force += rope_force
+            torque += np.cross(com_offset, rope_force)
+
+        return force, torque
 
     def MujuocoKeyCallback(self, key):
         glfw = mujoco.glfw.glfw
