@@ -1,6 +1,6 @@
 # P1 MuJoCo 仿真与 Real2Sim 工程
 
-本仓库是面向 P1 机器人的 `unitree_mujoco` 定制版本。当前主流程不是原版 Unitree SDK / DDS 桥接示例，而是一个单进程 MuJoCo 策略仿真与真机日志分析工具链。
+本仓库是面向 P1 机器人的sim2sim。当前是一个单进程 MuJoCo 策略仿真与真机日志分析工具链。
 
 核心目标有两个：
 
