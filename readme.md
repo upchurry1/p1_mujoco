@@ -621,7 +621,6 @@ simulate/src/ankle_motor_ik.hpp
 simulate/src/ankle_motor_fk.hpp
 ```
 
-不是运行时调用 `robot_deploy-main`。
 
 目前：
 
