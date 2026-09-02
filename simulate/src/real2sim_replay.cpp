@@ -1,5 +1,4 @@
 #include "mujoco_p1_backend.h"
-#include "ankle_motor_fk.hpp"
 #include "p1_config.h"
 #include "p1_policy_controller.h"
 #include "p1_types.h"
@@ -733,98 +732,6 @@ void appendMotorHeader(std::ostream& stream, const std::string& prefix, int coun
     }
 }
 
-bool isAnkleModelDof(const PolicyConfig& config, int model_index)
-{
-    return model_index == config.left_ankle_parallel.model_pitch_dof ||
-           model_index == config.left_ankle_parallel.model_roll_dof ||
-           model_index == config.right_ankle_parallel.model_pitch_dof ||
-           model_index == config.right_ankle_parallel.model_roll_dof;
-}
-
-bool motorIndexValid(int index)
-{
-    return index >= 0 && index < kPolicyDof;
-}
-
-void fillDirectModelTargetsFromMotor(
-    const PolicyConfig& config,
-    const std::array<double, kPolicyDof>& motor_target_rad,
-    std::array<double, kPolicyDof>& model_target_rad)
-{
-    for (int model_index = 0; model_index < kPolicyDof; ++model_index) {
-        if (isAnkleModelDof(config, model_index)) {
-            continue;
-        }
-        const int motor_index =
-            config.control_to_motor_index[static_cast<std::size_t>(model_index)];
-        if (!motorIndexValid(motor_index)) {
-            continue;
-        }
-        const auto motor_idx = static_cast<std::size_t>(motor_index);
-        const double motor_value = motor_target_rad[motor_idx];
-        if (std::isfinite(motor_value)) {
-            model_target_rad[static_cast<std::size_t>(model_index)] =
-                static_cast<double>(config.motor_to_model_direction[motor_idx]) *
-                motor_value;
-        }
-    }
-}
-
-void fillAnkleModelTargetsFromMotor(
-    const PolicyConfig& config,
-    const AnkleParallelMap& ankle_map,
-    const std::array<double, kPolicyDof>& motor_target_rad,
-    ankle_motor_fk::Solver& solver,
-    std::array<double, kPolicyDof>& model_target_rad)
-{
-    if (!motorIndexValid(ankle_map.upper_motor_index) ||
-        !motorIndexValid(ankle_map.lower_motor_index) ||
-        !motorIndexValid(ankle_map.model_pitch_dof) ||
-        !motorIndexValid(ankle_map.model_roll_dof)) {
-        return;
-    }
-
-    const auto upper_idx = static_cast<std::size_t>(ankle_map.upper_motor_index);
-    const auto lower_idx = static_cast<std::size_t>(ankle_map.lower_motor_index);
-    const double upper_motor =
-        static_cast<double>(config.motor_to_model_direction[upper_idx]) *
-        motor_target_rad[upper_idx];
-    const double lower_motor =
-        static_cast<double>(config.motor_to_model_direction[lower_idx]) *
-        motor_target_rad[lower_idx];
-    const ankle_motor_fk::FootAngles foot =
-        solver.solve(upper_motor, lower_motor);
-    if (!foot.reachable) {
-        return;
-    }
-
-    model_target_rad[static_cast<std::size_t>(ankle_map.model_pitch_dof)] =
-        foot.pitch;
-    model_target_rad[static_cast<std::size_t>(ankle_map.model_roll_dof)] =
-        foot.roll;
-}
-
-std::array<double, kPolicyDof> modelTargetFromMotorTarget(
-    const PolicyConfig& config,
-    const std::array<double, kPolicyDof>& motor_target_rad,
-    ankle_motor_fk::Solver& left_ankle_solver,
-    ankle_motor_fk::Solver& right_ankle_solver)
-{
-    std::array<double, kPolicyDof> model_target_rad = nanArray<kPolicyDof>();
-    fillDirectModelTargetsFromMotor(config, motor_target_rad, model_target_rad);
-    fillAnkleModelTargetsFromMotor(config,
-                                   config.left_ankle_parallel,
-                                   motor_target_rad,
-                                   left_ankle_solver,
-                                   model_target_rad);
-    fillAnkleModelTargetsFromMotor(config,
-                                   config.right_ankle_parallel,
-                                   motor_target_rad,
-                                   right_ankle_solver,
-                                   model_target_rad);
-    return model_target_rad;
-}
-
 template <typename Values>
 void appendValues(std::ostream& stream, const Values& values)
 {
@@ -849,7 +756,6 @@ void writeResultHeader(std::ostream& stream)
     appendMotorHeader(stream, "mujoco_dq_rad_s", kPolicyDof);
     appendArrayHeader(stream, "real_q_target_", kPolicyDof);
     appendMotorHeader(stream, "real_target_pos_rad", kPolicyDof);
-    appendArrayHeader(stream, "real_target_q_model_from_motor_rad_", kPolicyDof);
     stream << '\n';
 }
 
@@ -1024,7 +930,6 @@ int run(int argc, char** argv)
             return 1;
         }
         backend->setJointZeroOffset(options.joint_zero_offset_rad);
-        backend->setMujocoJointDirection(options.mujoco_joint_direction);
         backend->configureMotorDelay(options.motor_delay_enabled,
                                      options.motor_delay_min_seconds,
                                      options.motor_delay_max_seconds);
@@ -1064,8 +969,6 @@ int run(int argc, char** argv)
     ActionMetrics metrics;
     std::uint64_t written_frames = 0;
     bool printed_first_debug = false;
-    ankle_motor_fk::Solver real_left_ankle_target_fk;
-    ankle_motor_fk::Solver real_right_ankle_target_fk;
 
     const std::size_t process_begin =
         args.observation_stage == ObservationStage::kRaw ? 0 : output_begin;
@@ -1129,13 +1032,6 @@ int run(int argc, char** argv)
             }
             metrics.add(predicted_action, frame.logged_action);
         }
-        const std::array<double, kPolicyDof> real_target_q_model_from_motor_rad =
-            frame.have_real_target_pos_rad
-                ? modelTargetFromMotorTarget(config,
-                                             frame.real_target_pos_rad,
-                                             real_left_ankle_target_fk,
-                                             real_right_ankle_target_fk)
-                : nanArray<kPolicyDof>();
 
         result << written_frames << ',' << frame.timestamp;
         appendValues(result, frame.terms.base_ang_vel);
@@ -1161,7 +1057,6 @@ int run(int argc, char** argv)
                      frame.have_real_target_pos_rad
                          ? frame.real_target_pos_rad
                          : nanArray<kPolicyDof>());
-        appendValues(result, real_target_q_model_from_motor_rad);
         result << '\n';
         ++written_frames;
     }
