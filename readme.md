@@ -681,28 +681,6 @@ motor_fk_model_target_compare.png
 
 并确认系统有图形界面和 OpenGL / GLFW 环境。
 
-### 5. GitHub 推送失败：Could not resolve proxy
-
-如果报：
-
-```text
-Could not resolve proxy: 127.0.0.1.7890
-```
-
-说明 Git 全局代理配置错误或代理没有启动。可以关闭代理：
-
-```bash
-git config --global --unset http.proxy
-git config --global --unset https.proxy
-```
-
-也可以改成正确格式：
-
-```bash
-git config --global http.proxy http://127.0.0.1:7890
-git config --global https.proxy http://127.0.0.1:7890
-```
-
 ## 上游来源
 
 本工程基于 Unitree 官方 MuJoCo 工程修改：
