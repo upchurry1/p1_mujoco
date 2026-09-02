@@ -16,6 +16,8 @@ public:
     MujocoP1Backend(mjModel* model, mjData* data);
 
     bool initialize();
+    void setJointZeroOffset(const std::array<double, kPolicyDof>& offset_rad);
+    void setMujocoJointDirection(const std::array<int, kPolicyDof>& direction);
     void setMitTargets(const std::array<double, kPolicyDof>& q_motor_rad,
                        const std::array<double, kPolicyDof>& kp,
                        const std::array<double, kPolicyDof>& kd);
@@ -26,8 +28,10 @@ public:
     void setMotorDelayActive(bool active);
     void resetMotorDelay();
     bool readState(P1StateSnapshot& state) const;
-    void applyMitTorques();
+    bool applyMitTorques();
     double controlOfMotor(int motor_index) const;
+    double torquePermilleOfMotor(int motor_index, double torque_nm) const;
+    void setImuNoiseEnabled(bool enabled);
 
 private:
     struct MitCommandCache {
@@ -38,17 +42,22 @@ private:
         std::array<double, kPolicyDof> tau_ff{};
     };
 
-    struct DelayedTorqueCommand {
+    struct DelayedMitCommand {
         double release_time = 0.0;
-        std::array<double, kPolicyDof> tau{};
+        MitCommandCache command{};
     };
 
     int sensorAddress(const std::string& name) const;
+    double sensorNoiseStd(int sensor_id) const;
+    double sampleImuNoise(double stddev) const;
+    double readRawMotorPosition(int motor_index) const;
     double readMotorPosition(int motor_index) const;
     double readMotorVelocity(int motor_index) const;
     double readMotorForce(int motor_index) const;
+    bool computeMitTorques(const MitCommandCache& command,
+                           std::array<double, kPolicyDof>& requested_tau) const;
     void sampleMotorDelay();
-    void writeMotorTorques(const std::array<double, kPolicyDof>& tau);
+    bool writeMotorTorques(const std::array<double, kPolicyDof>& tau);
 
     mjModel* model_ = nullptr;
     mjData* data_ = nullptr;
@@ -60,17 +69,31 @@ private:
     int imu_quat_adr_ = -1;
     int imu_gyro_adr_ = -1;
     int imu_acc_adr_ = -1;
+    int imu_quat_sensor_id_ = -1;
+    int imu_gyro_sensor_id_ = -1;
+    int imu_acc_sensor_id_ = -1;
+    double imu_quat_noise_std_ = 0.0;
+    double imu_gyro_noise_std_ = 0.0;
+    double imu_acc_noise_std_ = 0.0;
+    bool imu_noise_enabled_ = false;
     int root_joint_id_ = -1;
+    std::array<double, kPolicyDof> joint_zero_offset_rad_{};
+    std::array<int, kPolicyDof> mujoco_joint_direction_{{
+        1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1
+    }};
     MitCommandCache command_{};
+    MitCommandCache applied_command_{};
     bool motor_delay_enabled_ = false;
     bool motor_delay_active_ = false;
-    bool motor_delay_has_output_ = false;
+    bool motor_delay_has_command_ = false;
     double motor_delay_min_seconds_ = 0.010;
     double motor_delay_max_seconds_ = 0.020;
     double active_motor_delay_seconds_ = 0.010;
-    std::deque<DelayedTorqueCommand> delayed_torque_queue_;
+    std::deque<DelayedMitCommand> delayed_command_queue_;
     std::array<double, kPolicyDof> applied_tau_{};
     std::mt19937 delay_rng_{5489u};
+    mutable std::mt19937 imu_noise_rng_{20260827u};
 };
 
 }  // namespace p1_sim

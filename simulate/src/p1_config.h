@@ -59,6 +59,10 @@ struct PolicyConfig {
 
     std::array<double, kPolicyDof> dof_pos_scale = filledArray<double, kPolicyDof>(1.0);
     std::array<double, kPolicyDof> dof_vel_scale = filledArray<double, kPolicyDof>(0.05);
+    std::array<double, 3> projected_gravity_scale{1.0, 1.0, 1.0};
+    std::array<double, 2> gait_phase_scale{1.0, 1.0};
+    std::array<double, kPolicyDof> last_action_scale =
+        filledArray<double, kPolicyDof>(1.0);
 
     std::array<double, kPolicyDof> policy_mit_kp_model{
         180.0, 180.0,
@@ -78,8 +82,24 @@ struct PolicyConfig {
         9.07, 9.07
     };
 
+    double raw_action_clip = 1.0;
     std::array<double, 3> command_scale{1.0, 1.0, 1.0};
     std::array<double, 3> body_ang_vel_scale{0.2, 0.2, 0.2};
+    bool observation_scale_first = false;
+    bool base_ang_vel_clip_enabled = false;
+    std::array<double, 2> base_ang_vel_clip{-10.0, 10.0};
+    bool projected_gravity_clip_enabled = false;
+    std::array<double, 2> projected_gravity_clip{-1.0, 1.0};
+    bool command_clip_enabled = false;
+    std::array<double, 2> command_clip{-1.0, 1.0};
+    bool gait_phase_clip_enabled = false;
+    std::array<double, 2> gait_phase_clip{-1.0, 1.0};
+    bool joint_pos_rel_clip_enabled = false;
+    std::array<double, 2> joint_pos_rel_clip{-3.0, 3.0};
+    bool joint_vel_rel_clip_enabled = false;
+    std::array<double, 2> joint_vel_rel_clip{-100.0, 100.0};
+    bool last_action_clip_enabled = false;
+    std::array<double, 2> last_action_clip{-1.0, 1.0};
     std::array<int, kPolicyDof> control_to_motor_index{
         0, 6,
         1, 7,
@@ -94,12 +114,37 @@ struct PolicyConfig {
     std::array<double, kPolicyDof> stand_pose_rad{};
     std::array<double, kPolicyDof> dof_pos_scale{};
     std::array<double, kPolicyDof> dof_vel_scale{};
+    std::array<double, 3> projected_gravity_scale{1.0, 1.0, 1.0};
+    std::array<double, 2> gait_phase_scale{1.0, 1.0};
+    std::array<double, kPolicyDof> last_action_scale =
+        filledArray<double, kPolicyDof>(1.0);
     std::array<double, kPolicyDof> policy_mit_kp_model{};
     std::array<double, kPolicyDof> policy_mit_kd_model{};
+    double raw_action_clip = 1.0;
     std::array<double, 3> command_scale{};
     std::array<double, 3> body_ang_vel_scale{};
+    bool observation_scale_first = false;
+    bool base_ang_vel_clip_enabled = false;
+    std::array<double, 2> base_ang_vel_clip{-10.0, 10.0};
+    bool projected_gravity_clip_enabled = false;
+    std::array<double, 2> projected_gravity_clip{-1.0, 1.0};
+    bool command_clip_enabled = false;
+    std::array<double, 2> command_clip{-1.0, 1.0};
+    bool gait_phase_clip_enabled = false;
+    std::array<double, 2> gait_phase_clip{-1.0, 1.0};
+    bool joint_pos_rel_clip_enabled = false;
+    std::array<double, 2> joint_pos_rel_clip{-3.0, 3.0};
+    bool joint_vel_rel_clip_enabled = false;
+    std::array<double, 2> joint_vel_rel_clip{-100.0, 100.0};
+    bool last_action_clip_enabled = false;
+    std::array<double, 2> last_action_clip{-1.0, 1.0};
     std::array<int, kPolicyDof> control_to_motor_index{};
 #endif
+    double policy_step_dt_s = 0.02;
+    double gait_phase_period_s = 0.74;
+    double gait_phase_stand_threshold = 0.05;
+    double gait_phase_move_threshold = 0.15;
+    bool include_gait_phase_observation = true;
     std::array<int, kPolicyDof> model_to_motor_index{
         0, 6,
         1, 7,
@@ -126,9 +171,12 @@ struct RunnerOptions {
     double policy_hz = 50.0;
     double stand_seconds = 2.0;
     double duration_seconds = 0.0;
+    bool auto_start_policy = false;
     double command_vx = 0.0;
     double command_vy = 0.0;
     double command_yaw_rate = 0.0;
+    std::string real_observation_log_path;
+    bool use_cli_command_on_policy_start = false;
     bool joystick_enabled = true;
     std::string joystick_type = "xbox";
     std::string joystick_device = "/dev/input/js0";
@@ -163,6 +211,22 @@ struct RunnerOptions {
     bool motor_delay_enabled = false;
     double motor_delay_min_seconds = 0.010;
     double motor_delay_max_seconds = 0.020;
+    bool observation_delay_enabled = false;
+    ObservationDelaySource observation_delay_source = ObservationDelaySource::kImu;
+    double observation_delay_seconds = 0.0;
+    bool imu_noise_enabled = false;
+    std::array<double, kPolicyDof> joint_zero_offset_rad{};
+    bool motor_to_model_direction_override = false;
+    std::array<int, kPolicyDof> motor_to_model_direction{
+        1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1
+    };
+    std::array<int, kPolicyDof> mujoco_joint_direction{
+        1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1
+    };
+    bool sim_log_enabled = true;
+    std::string sim_log_path;
     bool show_help = false;
     bool print_config = false;
 };

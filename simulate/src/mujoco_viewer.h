@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <vector>
 
 namespace p1_sim {
 
@@ -37,6 +38,16 @@ struct ViewerTelemetry {
     P1StateSnapshot state{};
     std::array<float, kPolicyDof> action{};
     std::array<double, kPolicyDof> control{};
+};
+
+struct ViewerFootContactTelemetry {
+    bool available = false;
+    bool left_touching = false;
+    bool right_touching = false;
+    int left_contacts = 0;
+    int right_contacts = 0;
+    double left_normal_force = 0.0;
+    double right_normal_force = 0.0;
 };
 
 class MujocoViewer {
@@ -83,12 +94,26 @@ private:
     void trimCurveHistory(double current_time);
     void renderCurveFigure(const mjrRect& viewport, const ViewerTelemetry& telemetry);
     void renderOverlay(const mjrRect& viewport, const ViewerTelemetry* telemetry);
+    void cacheFootGeomIds();
+    int footSideForGeom(int geom_id) const;
+    bool isWorldContactGeom(int geom_id) const;
+    void renderFootContactVisualization();
+    void addContactSphere(const mjtNum pos[3],
+                          const float rgba[4],
+                          double radius);
+    void addContactArrow(const mjtNum pos[3],
+                         const mjtNum normal[3],
+                         const float rgba[4],
+                         double normal_force);
 
     mjModel* model_ = nullptr;
     mjData* data_ = nullptr;
     GLFWwindow* window_ = nullptr;
     GLFWkeyfun keyboard_callback_ = nullptr;
     ViewerOverlayConfig overlay_config_{};
+    ViewerFootContactTelemetry foot_contacts_{};
+    std::vector<int> left_foot_geom_ids_;
+    std::vector<int> right_foot_geom_ids_;
     std::deque<CurveSample> curve_history_;
     double last_curve_sample_time_ = -1.0;
     mjvCamera camera_{};

@@ -6,6 +6,9 @@
 #include "torch_policy_runner.hpp"
 
 #include <array>
+#include <cstdint>
+#include <ostream>
+#include <vector>
 
 namespace p1_sim {
 
@@ -20,8 +23,22 @@ public:
               double vx,
               double vy,
               double yaw_rate,
+              std::array<double, kPolicyDof>& target_q_model_rad,
               std::array<double, kPolicyDof>& target_motor_rad,
               std::array<float, kPolicyDof>& raw_action);
+
+    bool buildObservationFromTerms(const P1ObservationTerms& terms,
+                                   std::vector<float>& observation);
+    bool inferObservation(const std::vector<float>& observation,
+                          std::array<float, kPolicyDof>& raw_action);
+    bool postprocessAction(const std::array<float, kPolicyDof>& raw_action,
+                           P1ActionPostprocess& postprocess) const;
+    void setLastActionForObservation(const std::array<float, kPolicyDof>& last_action);
+    void advancePolicyStep(const std::array<float, kPolicyDof>& raw_action);
+
+    std::size_t policySingleObservationSize() const;
+    std::size_t policyObservationSize() const;
+    void printObservationLayout(std::ostream& stream) const;
 
     const std::array<double, kPolicyDof>& policyKpMotor() const;
     const std::array<double, kPolicyDof>& policyKdMotor() const;
@@ -32,14 +49,15 @@ private:
                           double vx,
                           double vy,
                           double yaw_rate,
-                          std::array<float, kPolicyObservationSize>& observation);
+                          std::vector<float>& observation);
 
     PolicyConfig config_;
     inference::TorchPolicyRunner runner_;
     std::array<double, kPolicyDof> policy_mit_kp_motor_{};
     std::array<double, kPolicyDof> policy_mit_kd_motor_{};
     std::array<float, kPolicyDof> last_action_raw_{};
-    std::array<float, kPolicyObservationSize> observation_history_{};
+    std::vector<float> observation_history_;
+    std::uint64_t policy_step_count_ = 0;
     bool observation_history_ready_ = false;
 };
 

@@ -12,7 +12,9 @@ endif()
 option(BUILD_P1_MUJOCO_DEPLOY_SIM "Build the P1 SDK-free single-process MuJoCo policy runner" ON)
 option(P1_ENABLE_BUILTIN_POLICY_DEFAULTS
   "Allow hard-coded P1 policy parameters when deploy.yaml is not loaded" OFF)
-set(P1_ROBOT_DEPLOY_ROOT "/home/hr/gongxunp1/robot_deploy-main" CACHE PATH
+get_filename_component(P1_DEFAULT_ROBOT_DEPLOY_ROOT
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../robot_deploy-main" ABSOLUTE)
+set(P1_ROBOT_DEPLOY_ROOT "${P1_DEFAULT_ROBOT_DEPLOY_ROOT}" CACHE PATH
   "Path to robot_deploy-main for TorchPolicyRunner sources")
 
 
@@ -92,17 +94,17 @@ if(BUILD_P1_MUJOCO_DEPLOY_SIM)
   if(NOT P1_SKIP_TORCH_FIND_PACKAGE)
     find_package(Torch QUIET)
   endif()
-  set(P1_HAS_ROBOT_DEPLOY_TORCH_RUNNER OFF)
-  if(EXISTS "${P1_ROBOT_DEPLOY_ROOT}/src/inference/include/torch_policy_runner.hpp" AND
-     EXISTS "${P1_ROBOT_DEPLOY_ROOT}/src/inference/src/torch_policy_runner.cpp")
-    set(P1_HAS_ROBOT_DEPLOY_TORCH_RUNNER ON)
+  set(P1_HAS_LOCAL_TORCH_RUNNER OFF)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/torch_policy_runner.hpp" AND
+     EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/torch_policy_runner.cpp")
+    set(P1_HAS_LOCAL_TORCH_RUNNER ON)
   endif()
 
-  if(Torch_FOUND AND P1_HAS_ROBOT_DEPLOY_TORCH_RUNNER)
+  if(Torch_FOUND AND P1_HAS_LOCAL_TORCH_RUNNER)
     set(P1_TORCH_READY ON)
     set(P1_TORCH_LIBS ${TORCH_LIBRARIES})
     set(P1_TORCH_COMPILE_OPTIONS ${TORCH_CXX_FLAGS})
-  elseif(P1_SKIP_TORCH_FIND_PACKAGE AND P1_HAS_ROBOT_DEPLOY_TORCH_RUNNER AND
+  elseif(P1_SKIP_TORCH_FIND_PACKAGE AND P1_HAS_LOCAL_TORCH_RUNNER AND
          EXISTS "${P1_PYTORCH_TORCH_DIR}/include/torch/script.h" AND
          EXISTS "${P1_PYTORCH_TORCH_DIR}/include/torch/csrc/api/include/torch/torch.h" AND
          EXISTS "${P1_PYTORCH_TORCH_DIR}/lib/libtorch_cpu.so" AND
@@ -124,30 +126,35 @@ if(BUILD_P1_MUJOCO_DEPLOY_SIM)
     )
   elseif(NOT P1_SKIP_TORCH_FIND_PACKAGE)
     message(WARNING
-      "Skipping P1 Torch runners: Torch or robot_deploy-main TorchPolicyRunner was not found.")
+      "Skipping P1 Torch runners: Torch or local TorchPolicyRunner was not found.")
   else()
     message(WARNING
       "Skipping P1 Torch runners: direct Python torch fallback is not usable.")
   endif()
 
   if(P1_TORCH_READY)
-    add_executable(p1_mujoco_deploy_sim
-      src/main.cpp
+    set(P1_POLICY_RUNTIME_SOURCES
       src/p1_config.cpp
       src/p1_policy_controller.cpp
       src/mujoco_p1_backend.cpp
+      src/torch_policy_runner.cpp
+    )
+
+    add_executable(p1_mujoco_deploy_sim
+      src/main.cpp
+      ${P1_POLICY_RUNTIME_SOURCES}
+      src/p1_sim_log.cpp
       src/mujoco_viewer.cpp
       src/elastic_rope.cpp
       src/joystick/p1_joystick_velocity.cc
       src/joystick/joystick.cc
-      ${P1_ROBOT_DEPLOY_ROOT}/src/inference/src/torch_policy_runner.cpp
     )
     target_compile_definitions(p1_mujoco_deploy_sim PRIVATE
-      POLICY_V3=0
       P1_ENABLE_BUILTIN_POLICY_DEFAULTS=$<BOOL:${P1_ENABLE_BUILTIN_POLICY_DEFAULTS}>
     )
     target_compile_options(p1_mujoco_deploy_sim PRIVATE ${P1_TORCH_COMPILE_OPTIONS})
     target_include_directories(p1_mujoco_deploy_sim PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
       ${P1_ROBOT_DEPLOY_ROOT}/src/inference/include
       ${P1_TORCH_INCLUDE_DIRS}
     )
@@ -158,6 +165,31 @@ if(BUILD_P1_MUJOCO_DEPLOY_SIM)
       ${P1_TORCH_LIBS}
       mujoco
       glfw
+      yaml-cpp
+      fmt
+      pthread
+      dl
+    )
+
+    add_executable(real2sim_replay
+      src/real2sim_replay.cpp
+      ${P1_POLICY_RUNTIME_SOURCES}
+    )
+    target_compile_definitions(real2sim_replay PRIVATE
+      P1_ENABLE_BUILTIN_POLICY_DEFAULTS=$<BOOL:${P1_ENABLE_BUILTIN_POLICY_DEFAULTS}>
+    )
+    target_compile_options(real2sim_replay PRIVATE ${P1_TORCH_COMPILE_OPTIONS})
+    target_include_directories(real2sim_replay PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+      ${P1_ROBOT_DEPLOY_ROOT}/src/inference/include
+      ${P1_TORCH_INCLUDE_DIRS}
+    )
+    if(P1_TORCH_LINK_OPTIONS)
+      target_link_options(real2sim_replay PRIVATE ${P1_TORCH_LINK_OPTIONS})
+    endif()
+    target_link_libraries(real2sim_replay PRIVATE
+      ${P1_TORCH_LIBS}
+      mujoco
       yaml-cpp
       fmt
       pthread

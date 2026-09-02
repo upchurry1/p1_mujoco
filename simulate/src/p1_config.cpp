@@ -20,6 +20,8 @@
 namespace p1_sim {
 namespace {
 
+constexpr double kDegToRad = 0.017453292519943295769;
+
 std::filesystem::path executablePath()
 {
     std::array<char, PATH_MAX> path{};
@@ -36,19 +38,19 @@ std::string defaultModelPath()
     const std::filesystem::path exe = executablePath();
     if (!exe.empty()) {
         const auto repo_root = exe.parent_path().parent_path().parent_path();
-        const auto candidate = repo_root / "unitree_robots" / "p1_v2" / "scene.xml";
+        const auto candidate = repo_root / "unitree_robots" / "p1_803_nobattery" / "scene.xml";
         if (std::filesystem::exists(candidate)) {
             return candidate.string();
         }
     }
 
     const auto cwd_candidate =
-        std::filesystem::current_path() / "unitree_robots" / "p1_v2" / "scene.xml";
+        std::filesystem::current_path() / "unitree_robots" / "p1_803_nobattery" / "scene.xml";
     if (std::filesystem::exists(cwd_candidate)) {
         return cwd_candidate.string();
     }
 
-    return "../unitree_robots/p1_v2/scene.xml";
+    return "../unitree_robots/p1_803_nobattery/scene.xml";
 }
 
 std::string defaultRunnerConfigPath()
@@ -91,6 +93,16 @@ std::filesystem::path expandUserPath(const std::string& text)
     return std::filesystem::path(text);
 }
 
+std::string trimAscii(const std::string& text)
+{
+    const std::size_t begin = text.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+        return {};
+    }
+    const std::size_t end = text.find_last_not_of(" \t\r\n");
+    return text.substr(begin, end - begin + 1);
+}
+
 std::string resolveConfigPath(const std::string& text,
                               const std::filesystem::path& config_path)
 {
@@ -129,16 +141,78 @@ bool nodePresent(const YAML::Node& node)
 
 double parseDouble(const std::string& text, const std::string& flag)
 {
+    const std::string trimmed = trimAscii(text);
     try {
         std::size_t parsed = 0;
-        const double value = std::stod(text, &parsed);
-        if (parsed != text.size()) {
+        const double value = std::stod(trimmed, &parsed);
+        if (parsed != trimmed.size()) {
             throw std::invalid_argument("trailing characters");
         }
         return value;
     } catch (const std::exception& error) {
         throw std::runtime_error("invalid value for " + flag + ": " + text +
                                  " (" + error.what() + ")");
+    }
+}
+
+template <std::size_t N>
+void parseDoubleScalarOrCommaArray(const std::string& text,
+                                   const std::string& flag,
+                                   std::array<double, N>& values)
+{
+    if (text.find(',') == std::string::npos) {
+        values.fill(parseDouble(text, flag));
+        return;
+    }
+
+    std::istringstream stream(text);
+    std::string token;
+    std::size_t index = 0;
+    while (std::getline(stream, token, ',')) {
+        if (index >= N) {
+            throw std::runtime_error(flag + " must contain exactly " +
+                                     std::to_string(N) +
+                                     " comma-separated values");
+        }
+        const std::string value = trimAscii(token);
+        if (value.empty()) {
+            throw std::runtime_error(flag + " contains an empty value");
+        }
+        values[index++] = parseDouble(value, flag);
+    }
+    if (index != N) {
+        throw std::runtime_error(flag + " must contain exactly " +
+                                 std::to_string(N) +
+                                 " comma-separated values");
+    }
+}
+
+int parseInt(const std::string& text, const std::string& flag);
+
+template <std::size_t N>
+void parseIntCommaArray(const std::string& text,
+                        const std::string& flag,
+                        std::array<int, N>& values)
+{
+    std::istringstream stream(text);
+    std::string token;
+    std::size_t index = 0;
+    while (std::getline(stream, token, ',')) {
+        if (index >= N) {
+            throw std::runtime_error(flag + " must contain exactly " +
+                                     std::to_string(N) +
+                                     " comma-separated values");
+        }
+        const std::string value = trimAscii(token);
+        if (value.empty()) {
+            throw std::runtime_error(flag + " contains an empty value");
+        }
+        values[index++] = parseInt(value, flag);
+    }
+    if (index != N) {
+        throw std::runtime_error(flag + " must contain exactly " +
+                                 std::to_string(N) +
+                                 " comma-separated values");
     }
 }
 
@@ -250,6 +324,54 @@ ViewerCurveSignal parseViewerCurveSignal(const std::string& text,
                              " must be one of q, dq, tau, ctrl, q+dq, all");
 }
 
+ObservationDelaySource parseObservationDelaySource(const std::string& text,
+                                                   const std::string& source)
+{
+    const std::string value = normalizedToken(text);
+    if (value == "imu" || value == "base" || value == "inertial") {
+        return ObservationDelaySource::kImu;
+    }
+    if (value == "motor" || value == "motors" || value == "joint" ||
+        value == "joints" || value == "encoder" || value == "encoders") {
+        return ObservationDelaySource::kMotor;
+    }
+    throw std::runtime_error(source + " must be imu or motor");
+}
+
+const char* observationDelaySourceName(ObservationDelaySource source)
+{
+    switch (source) {
+    case ObservationDelaySource::kImu:
+        return "imu";
+    case ObservationDelaySource::kMotor:
+        return "motor";
+    }
+    return "imu";
+}
+
+bool parseGaitPhaseObservationEnabled(const std::string& text,
+                                      const std::string& source)
+{
+    const std::string value = normalizedToken(text);
+    if (value == "true" || value == "1" || value == "on" ||
+        value == "yes" || value == "gait_phase" ||
+        value == "with_gait_phase" || value == "with_gait" ||
+        value == "47" || value == "47x15" || value == "705" ||
+        value == "47x5" || value == "235") {
+        return true;
+    }
+    if (value == "false" || value == "0" || value == "off" ||
+        value == "no" || value == "no_gait_phase" ||
+        value == "without_gait_phase" || value == "without_gait" ||
+        value == "legacy" || value == "45" || value == "45x15" ||
+        value == "675" || value == "45x5" || value == "225") {
+        return false;
+    }
+    throw std::runtime_error(source +
+                             " must be true/false, with_gait_phase, "
+                             "without_gait_phase, 705, or 675");
+}
+
 const char* viewerCurveSignalName(ViewerCurveSignal signal)
 {
     switch (signal) {
@@ -299,6 +421,47 @@ void loadDoubleArray(const YAML::Node& node,
     }
     for (std::size_t i = 0; i < N; ++i) {
         values[i] = node[i].as<double>();
+    }
+}
+
+template <std::size_t N>
+void loadDoubleScalarOrArray(const YAML::Node& node,
+                             const std::string& path,
+                             std::array<double, N>& values)
+{
+    if (!node) {
+        return;
+    }
+    if (node.IsScalar()) {
+        parseDoubleScalarOrCommaArray(scalarText(node, path), path, values);
+        return;
+    }
+    loadDoubleArray(node, path, values);
+}
+
+template <std::size_t N>
+void loadDegreeScalarOrArrayAsRadians(const YAML::Node& node,
+                                      const std::string& path,
+                                      std::array<double, N>& values)
+{
+    std::array<double, N> values_deg{};
+    loadDoubleScalarOrArray(node, path, values_deg);
+    for (std::size_t i = 0; i < N; ++i) {
+        values[i] = values_deg[i] * kDegToRad;
+    }
+}
+
+void loadObservationClip(const YAML::Node& term,
+                         const std::string& path,
+                         bool& enabled,
+                         std::array<double, 2>& range)
+{
+    const YAML::Node clip = optionalAnyNode(term, {"clip", "range"});
+    if (nodePresent(clip)) {
+        loadDoubleArray(clip, path + ".clip", range);
+        enabled = true;
+    } else {
+        enabled = false;
     }
 }
 
@@ -520,6 +683,7 @@ void loadDeployConfig(const std::string& path,
     if (step_dt <= 0.0 || !std::isfinite(step_dt)) {
         throw std::runtime_error("step_dt must be finite and > 0");
     }
+    config.policy_step_dt_s = step_dt;
     options.policy_hz = 1.0 / step_dt;
 
     loadDoubleArray(requireNode(root, "stiffness", "deploy"),
@@ -541,6 +705,21 @@ void loadDeployConfig(const std::string& path,
     loadDoubleArray(requireNode(joint_action, "scale", "deploy.actions.JointPositionAction"),
                     "actions.JointPositionAction.scale",
                     config.action_scale);
+    const YAML::Node raw_action_clip =
+        optionalAnyNode(joint_action, {"raw_action_clip", "raw_clip"});
+    if (nodePresent(raw_action_clip)) {
+        config.raw_action_clip =
+            parseDouble(scalarText(raw_action_clip,
+                                   "actions.JointPositionAction.raw_action_clip"),
+                        "actions.JointPositionAction.raw_action_clip");
+    }
+    const YAML::Node root_raw_action_clip =
+        optionalAnyNode(root, {"raw_action_clip", "policy_raw_action_clip"});
+    if (nodePresent(root_raw_action_clip)) {
+        config.raw_action_clip =
+            parseDouble(scalarText(root_raw_action_clip, "raw_action_clip"),
+                        "raw_action_clip");
+    }
     const YAML::Node action_offset =
         optionalAnyNode(joint_action, {"offset", "default_joint_pos"});
     if (nodePresent(action_offset)) {
@@ -567,11 +746,36 @@ void loadDeployConfig(const std::string& path,
     }
 
     const YAML::Node observations = requireNode(root, "observations", "deploy");
-    loadDoubleArray(requireNode(requireNode(observations, "base_ang_vel", "deploy.observations"),
+    const YAML::Node observation_scale_first = observations["scale_first"];
+    if (nodePresent(observation_scale_first)) {
+        config.observation_scale_first =
+            parseBoolScalar(observation_scale_first, "observations.scale_first");
+    }
+
+    const YAML::Node base_ang_vel =
+        requireNode(observations, "base_ang_vel", "deploy.observations");
+    loadDoubleArray(requireNode(base_ang_vel,
                                 "scale",
                                 "deploy.observations.base_ang_vel"),
                     "observations.base_ang_vel.scale",
                     config.body_ang_vel_scale);
+    loadObservationClip(base_ang_vel,
+                        "observations.base_ang_vel",
+                        config.base_ang_vel_clip_enabled,
+                        config.base_ang_vel_clip);
+
+    const YAML::Node projected_gravity =
+        requireNode(observations, "projected_gravity", "deploy.observations");
+    loadDoubleArray(requireNode(projected_gravity,
+                                "scale",
+                                "deploy.observations.projected_gravity"),
+                    "observations.projected_gravity.scale",
+                    config.projected_gravity_scale);
+    loadObservationClip(projected_gravity,
+                        "observations.projected_gravity",
+                        config.projected_gravity_clip_enabled,
+                        config.projected_gravity_clip);
+
     const YAML::Node velocity_commands =
         requireAnyNode(observations,
                        {"keyboard_velocity_commands", "velocity_commands"},
@@ -581,16 +785,89 @@ void loadDeployConfig(const std::string& path,
                                 "deploy.observations.velocity_commands"),
                     "observations.velocity_commands.scale",
                     config.command_scale);
-    loadDoubleArray(requireNode(requireNode(observations, "joint_pos_rel", "deploy.observations"),
+    loadObservationClip(velocity_commands,
+                        "observations.velocity_commands",
+                        config.command_clip_enabled,
+                        config.command_clip);
+
+    const YAML::Node joint_pos_rel =
+        requireNode(observations, "joint_pos_rel", "deploy.observations");
+    loadDoubleArray(requireNode(joint_pos_rel,
                                 "scale",
                                 "deploy.observations.joint_pos_rel"),
                     "observations.joint_pos_rel.scale",
                     config.dof_pos_scale);
-    loadDoubleArray(requireNode(requireNode(observations, "joint_vel_rel", "deploy.observations"),
+    loadObservationClip(joint_pos_rel,
+                        "observations.joint_pos_rel",
+                        config.joint_pos_rel_clip_enabled,
+                        config.joint_pos_rel_clip);
+
+    const YAML::Node joint_vel_rel =
+        requireNode(observations, "joint_vel_rel", "deploy.observations");
+    loadDoubleArray(requireNode(joint_vel_rel,
                                 "scale",
                                 "deploy.observations.joint_vel_rel"),
                     "observations.joint_vel_rel.scale",
                     config.dof_vel_scale);
+    loadObservationClip(joint_vel_rel,
+                        "observations.joint_vel_rel",
+                        config.joint_vel_rel_clip_enabled,
+                        config.joint_vel_rel_clip);
+
+    const YAML::Node last_action =
+        requireNode(observations, "last_action", "deploy.observations");
+    loadDoubleArray(requireNode(last_action,
+                                "scale",
+                                "deploy.observations.last_action"),
+                    "observations.last_action.scale",
+                    config.last_action_scale);
+    loadObservationClip(last_action,
+                        "observations.last_action",
+                        config.last_action_clip_enabled,
+                        config.last_action_clip);
+
+    const YAML::Node gait_phase =
+        optionalAnyNode(observations, {"gait_phase"});
+    if (nodePresent(gait_phase)) {
+        const YAML::Node scale = gait_phase["scale"];
+        if (nodePresent(scale)) {
+            loadDoubleArray(scale,
+                            "observations.gait_phase.scale",
+                            config.gait_phase_scale);
+        }
+        loadObservationClip(gait_phase,
+                            "observations.gait_phase",
+                            config.gait_phase_clip_enabled,
+                            config.gait_phase_clip);
+
+        const YAML::Node params = gait_phase["params"];
+        if (nodePresent(params)) {
+            const YAML::Node period = params["period"];
+            if (nodePresent(period)) {
+                config.gait_phase_period_s = period.as<double>();
+            }
+            const YAML::Node stand_threshold =
+                optionalAnyNode(params, {"stand_threshold",
+                                         "gait_phase_stand_threshold",
+                                         "stand_command_threshold"});
+            if (nodePresent(stand_threshold)) {
+                config.gait_phase_stand_threshold =
+                    parseDouble(scalarText(stand_threshold,
+                                           "observations.gait_phase.params.stand_threshold"),
+                                "observations.gait_phase.params.stand_threshold");
+            }
+            const YAML::Node move_threshold =
+                optionalAnyNode(params, {"move_threshold",
+                                         "gait_phase_move_threshold",
+                                         "move_command_threshold"});
+            if (nodePresent(move_threshold)) {
+                config.gait_phase_move_threshold =
+                    parseDouble(scalarText(move_threshold,
+                                           "observations.gait_phase.params.move_threshold"),
+                                "observations.gait_phase.params.move_threshold");
+            }
+        }
+    }
 }
 
 void loadViewerConfigDefaultsFromNode(const YAML::Node& node,
@@ -750,6 +1027,54 @@ void loadMotorDelayConfigDefaultsFromNode(const YAML::Node& node,
     }
 }
 
+void loadObservationDelayConfigDefaultsFromNode(const YAML::Node& node,
+                                                const std::string& path,
+                                                RunnerOptions& options)
+{
+    if (!nodePresent(node)) {
+        return;
+    }
+    if (node.IsScalar()) {
+        options.observation_delay_enabled = parseBoolScalar(node, path);
+        return;
+    }
+    if (!node.IsMap()) {
+        throw std::runtime_error(path + " must be a map or boolean");
+    }
+
+    const YAML::Node enabled =
+        optionalAnyNode(node, {"enabled", "enable", "use_delay"});
+    if (nodePresent(enabled)) {
+        options.observation_delay_enabled =
+            parseBoolScalar(enabled, path + ".enabled");
+    }
+
+    const YAML::Node source =
+        optionalAnyNode(node, {"source", "delay_source", "delayed_source"});
+    if (nodePresent(source)) {
+        options.observation_delay_source =
+            parseObservationDelaySource(scalarText(source, path + ".source"),
+                                        path + ".source");
+    }
+
+    const YAML::Node delay_ms =
+        optionalAnyNode(node, {"delay_ms", "latency_ms", "ms"});
+    if (nodePresent(delay_ms)) {
+        options.observation_delay_seconds =
+            parseDouble(scalarText(delay_ms, path + ".delay_ms"),
+                        path + ".delay_ms") *
+            0.001;
+    }
+
+    const YAML::Node delay_seconds =
+        optionalAnyNode(node, {"delay_seconds", "latency_seconds", "seconds"});
+    if (nodePresent(delay_seconds)) {
+        options.observation_delay_seconds =
+            parseDouble(scalarText(delay_seconds, path + ".delay_seconds"),
+                        path + ".delay_seconds");
+    }
+}
+
 void loadJoystickConfigDefaultsFromNode(const YAML::Node& node,
                                         const std::string& path,
                                         RunnerOptions& options)
@@ -835,6 +1160,69 @@ void loadJoystickConfigDefaultsFromNode(const YAML::Node& node,
     }
 }
 
+void loadLoggingConfigDefaultsFromNode(const YAML::Node& node,
+                                       const std::string& path,
+                                       const std::filesystem::path& config_path,
+                                       RunnerOptions& options)
+{
+    if (!nodePresent(node)) {
+        return;
+    }
+    if (node.IsScalar()) {
+        options.sim_log_enabled = parseBoolScalar(node, path);
+        return;
+    }
+    if (!node.IsMap()) {
+        throw std::runtime_error(path + " must be a map or boolean");
+    }
+
+    const YAML::Node enabled =
+        optionalAnyNode(node, {"enabled", "enable"});
+    if (nodePresent(enabled)) {
+        options.sim_log_enabled = parseBoolScalar(enabled,
+                                                  path + ".enabled");
+    }
+
+    const YAML::Node log_path =
+        optionalAnyNode(node, {"path", "csv", "csv_path", "file"});
+    if (nodePresent(log_path)) {
+        options.sim_log_path =
+            resolveConfigPath(scalarText(log_path, path + ".path"),
+                              config_path);
+    }
+
+    const YAML::Node log_dir =
+        optionalAnyNode(node, {"dir", "directory", "log_dir", "folder"});
+    if (nodePresent(log_dir)) {
+        options.sim_log_path =
+            resolveConfigPath(scalarText(log_dir, path + ".dir"),
+                              config_path);
+    }
+}
+
+void loadElasticRopeConfigDefaultsFromNode(const YAML::Node& node,
+                                           const std::string& path,
+                                           RunnerOptions& options)
+{
+    if (!nodePresent(node)) {
+        return;
+    }
+    if (node.IsScalar()) {
+        options.elastic_rope_enabled = parseBoolScalar(node, path);
+        return;
+    }
+    if (!node.IsMap()) {
+        throw std::runtime_error(path + " must be a map or boolean");
+    }
+
+    const YAML::Node enabled =
+        optionalAnyNode(node, {"enabled", "enable", "use_rope"});
+    if (nodePresent(enabled)) {
+        options.elastic_rope_enabled = parseBoolScalar(enabled,
+                                                       path + ".enabled");
+    }
+}
+
 void loadRunnerConfigDefaults(const std::string& path,
                               RunnerOptions& options,
                               PolicyConfig& config)
@@ -864,13 +1252,203 @@ void loadRunnerConfigDefaults(const std::string& path,
             resolveConfigPath(policy.as<std::string>(), config_path);
     }
 
+    const YAML::Node real_observation_log =
+        optionalAnyNode(paths, {"real_observation_log_path",
+                                "real_observation_log",
+                                "real_policy_observation_log"});
+    if (nodePresent(real_observation_log) && real_observation_log.IsScalar()) {
+        options.real_observation_log_path =
+            resolveConfigPath(real_observation_log.as<std::string>(),
+                              config_path);
+    }
+
+    const YAML::Node policy_observation =
+        optionalAnyNode(root, {"policy_observation",
+                               "policy_observations",
+                               "observation_layout",
+                               "policy_observation_layout"});
+    if (nodePresent(policy_observation)) {
+        if (policy_observation.IsScalar()) {
+            config.include_gait_phase_observation =
+                parseGaitPhaseObservationEnabled(
+                    scalarText(policy_observation, "policy_observation"),
+                    "policy_observation");
+        } else if (policy_observation.IsMap()) {
+            const YAML::Node gait_phase =
+                optionalAnyNode(policy_observation,
+                                {"gait_phase",
+                                 "include_gait_phase",
+                                 "with_gait_phase",
+                                 "use_gait_phase"});
+            const YAML::Node layout =
+                optionalAnyNode(policy_observation, {"layout", "type", "mode"});
+            if (nodePresent(gait_phase)) {
+                config.include_gait_phase_observation =
+                    parseGaitPhaseObservationEnabled(
+                        scalarText(gait_phase, "policy_observation.gait_phase"),
+                        "policy_observation.gait_phase");
+            } else if (nodePresent(layout)) {
+                config.include_gait_phase_observation =
+                    parseGaitPhaseObservationEnabled(
+                        scalarText(layout, "policy_observation.layout"),
+                        "policy_observation.layout");
+            }
+        } else {
+            throw std::runtime_error("policy_observation must be a scalar or map");
+        }
+    }
+
+    const YAML::Node gait_phase_observation =
+        optionalAnyNode(root, {"policy_observation_gait_phase",
+                               "include_gait_phase_observation"});
+    if (nodePresent(gait_phase_observation)) {
+        config.include_gait_phase_observation =
+            parseGaitPhaseObservationEnabled(
+                scalarText(gait_phase_observation,
+                           "policy_observation_gait_phase"),
+                "policy_observation_gait_phase");
+    }
+
+    const YAML::Node raw_action_clip =
+        optionalAnyNode(root, {"raw_action_clip", "policy_raw_action_clip"});
+    if (nodePresent(raw_action_clip)) {
+        config.raw_action_clip =
+            parseDouble(scalarText(raw_action_clip, "raw_action_clip"),
+                        "raw_action_clip");
+    }
+
+    const YAML::Node motor_direction_override =
+        optionalAnyNode(root, {"mujoco_motor_to_model_direction",
+                               "motor_to_model_direction_override",
+                               "motor_to_model_direction"});
+    if (nodePresent(motor_direction_override)) {
+        loadPlainIntArray(motor_direction_override,
+                          "mujoco_motor_to_model_direction",
+                          options.motor_to_model_direction);
+        options.motor_to_model_direction_override = true;
+    }
+
+    const YAML::Node mujoco_joint_direction =
+        optionalAnyNode(root, {"mujoco_joint_direction",
+                               "mujoco_joint_sign",
+                               "mujoco_joint_directions"});
+    if (nodePresent(mujoco_joint_direction)) {
+        loadPlainIntArray(mujoco_joint_direction,
+                          "mujoco_joint_direction",
+                          options.mujoco_joint_direction);
+    }
+
+    const YAML::Node gait_phase_stand_threshold =
+        optionalAnyNode(root, {"gait_phase_stand_threshold",
+                               "policy_gait_phase_stand_threshold"});
+    if (nodePresent(gait_phase_stand_threshold)) {
+        config.gait_phase_stand_threshold =
+            parseDouble(scalarText(gait_phase_stand_threshold,
+                                   "gait_phase_stand_threshold"),
+                        "gait_phase_stand_threshold");
+    }
+    const YAML::Node gait_phase_move_threshold =
+        optionalAnyNode(root, {"gait_phase_move_threshold",
+                               "policy_gait_phase_move_threshold"});
+    if (nodePresent(gait_phase_move_threshold)) {
+        config.gait_phase_move_threshold =
+            parseDouble(scalarText(gait_phase_move_threshold,
+                                   "gait_phase_move_threshold"),
+                        "gait_phase_move_threshold");
+    }
+
+    const YAML::Node auto_start_policy =
+        optionalAnyNode(root, {"auto_start_policy", "start_policy",
+                               "policy_auto_start", "policy_autostart"});
+    if (nodePresent(auto_start_policy)) {
+        options.auto_start_policy =
+            parseBoolScalar(auto_start_policy, "auto_start_policy");
+    }
+
+    const YAML::Node use_cli_command =
+        optionalAnyNode(root, {"use_cli_command_on_policy_start",
+                               "use_cli_command_on_start",
+                               "start_with_cli_command",
+                               "fixed_cli_command"});
+    if (nodePresent(use_cli_command)) {
+        options.use_cli_command_on_policy_start =
+            parseBoolScalar(use_cli_command, "use_cli_command_on_policy_start");
+    }
+
+    const YAML::Node imu_noise =
+        optionalAnyNode(root, {"imu_noise", "imu_sensor_noise", "sensor_noise"});
+    if (nodePresent(imu_noise)) {
+        if (imu_noise.IsScalar()) {
+            options.imu_noise_enabled =
+                parseBoolScalar(imu_noise, "imu_noise");
+        } else if (imu_noise.IsMap()) {
+            const YAML::Node enabled =
+                optionalAnyNode(imu_noise, {"enabled", "enable", "active"});
+            if (nodePresent(enabled)) {
+                options.imu_noise_enabled =
+                    parseBoolScalar(enabled, "imu_noise.enabled");
+            }
+        } else {
+            throw std::runtime_error("imu_noise must be a scalar or map");
+        }
+    }
+
     loadViewerConfigDefaultsFromNode(root["viewer"], "viewer", options);
     loadMotorDelayConfigDefaultsFromNode(root["motor_delay"],
                                          "motor_delay",
                                          options);
+    loadObservationDelayConfigDefaultsFromNode(
+        optionalAnyNode(root, {"observation_delay",
+                               "sensor_time_offset",
+                               "state_observation_delay"}),
+        "observation_delay",
+        options);
     loadJoystickConfigDefaultsFromNode(root["joystick"],
                                        "joystick",
                                        options);
+    loadLoggingConfigDefaultsFromNode(root["logging"],
+                                      "logging",
+                                      config_path,
+                                      options);
+    loadElasticRopeConfigDefaultsFromNode(
+        optionalAnyNode(root, {"elastic_rope", "rope", "suspension_rope"}),
+        "elastic_rope",
+        options);
+
+    const YAML::Node elastic_rope_enabled =
+        optionalAnyNode(root, {"elastic_rope_enabled", "rope_enabled"});
+    if (nodePresent(elastic_rope_enabled)) {
+        options.elastic_rope_enabled =
+            parseBoolScalar(elastic_rope_enabled, "elastic_rope_enabled");
+    }
+
+    const YAML::Node joint_zero_offset_rad =
+        optionalAnyNode(root, {"joint_zero_offset_rad",
+                               "joint_zero_offsets_rad",
+                               "motor_zero_offset_rad",
+                               "encoder_zero_offset_rad",
+                               "encoder_zero_offsets_rad"});
+    const YAML::Node joint_zero_offset_deg =
+        optionalAnyNode(root, {"joint_zero_offset_deg",
+                               "joint_zero_offsets_deg",
+                               "motor_zero_offset_deg",
+                               "encoder_zero_offset_deg",
+                               "encoder_zero_offsets_deg"});
+    if (nodePresent(joint_zero_offset_rad) &&
+        nodePresent(joint_zero_offset_deg)) {
+        throw std::runtime_error("set only one of joint_zero_offset_rad or "
+                                 "joint_zero_offset_deg");
+    }
+    if (nodePresent(joint_zero_offset_rad)) {
+        loadDoubleScalarOrArray(joint_zero_offset_rad,
+                                "joint_zero_offset_rad",
+                                options.joint_zero_offset_rad);
+    }
+    if (nodePresent(joint_zero_offset_deg)) {
+        loadDegreeScalarOrArrayAsRadians(joint_zero_offset_deg,
+                                         "joint_zero_offset_deg",
+                                         options.joint_zero_offset_rad);
+    }
 
     const YAML::Node viewer_overlay =
         optionalAnyNode(root, {"viewer_overlay", "viewer_overlay_enabled"});
@@ -986,6 +1564,48 @@ void loadRunnerConfigDefaults(const std::string& path,
                         "motor_delay_max_seconds");
     }
 
+    const YAML::Node observation_delay_enabled =
+        optionalAnyNode(root, {"observation_delay_enabled",
+                               "sensor_time_offset_enabled",
+                               "state_observation_delay_enabled"});
+    if (nodePresent(observation_delay_enabled)) {
+        options.observation_delay_enabled =
+            parseBoolScalar(observation_delay_enabled,
+                            "observation_delay_enabled");
+    }
+    const YAML::Node observation_delay_source =
+        optionalAnyNode(root, {"observation_delay_source",
+                               "sensor_time_offset_source",
+                               "delayed_observation_source"});
+    if (nodePresent(observation_delay_source)) {
+        options.observation_delay_source =
+            parseObservationDelaySource(
+                scalarText(observation_delay_source,
+                           "observation_delay_source"),
+                "observation_delay_source");
+    }
+    const YAML::Node observation_delay_ms =
+        optionalAnyNode(root, {"observation_delay_ms",
+                               "sensor_time_offset_ms",
+                               "state_observation_delay_ms"});
+    if (nodePresent(observation_delay_ms)) {
+        options.observation_delay_seconds =
+            parseDouble(scalarText(observation_delay_ms,
+                                   "observation_delay_ms"),
+                        "observation_delay_ms") *
+            0.001;
+    }
+    const YAML::Node observation_delay_seconds =
+        optionalAnyNode(root, {"observation_delay_seconds",
+                               "sensor_time_offset_seconds",
+                               "state_observation_delay_seconds"});
+    if (nodePresent(observation_delay_seconds)) {
+        options.observation_delay_seconds =
+            parseDouble(scalarText(observation_delay_seconds,
+                                   "observation_delay_seconds"),
+                        "observation_delay_seconds");
+    }
+
     const YAML::Node joystick_enabled =
         optionalAnyNode(root, {"joystick_enabled", "xbox_enabled"});
     if (nodePresent(joystick_enabled)) {
@@ -1025,10 +1645,97 @@ void loadRunnerConfigDefaults(const std::string& path,
                         "joystick_signs",
                         options.joystick_signs);
     }
+
+    const YAML::Node sim_log_enabled =
+        optionalAnyNode(root, {"sim_log_enabled", "tracking_log_enabled",
+                               "csv_log_enabled"});
+    if (nodePresent(sim_log_enabled)) {
+        options.sim_log_enabled =
+            parseBoolScalar(sim_log_enabled, "sim_log_enabled");
+    }
+    const YAML::Node sim_log_path =
+        optionalAnyNode(root, {"sim_log_path", "tracking_log_path",
+                               "csv_log_path"});
+    if (nodePresent(sim_log_path)) {
+        options.sim_log_path =
+            resolveConfigPath(scalarText(sim_log_path, "sim_log_path"),
+                              config_path);
+    }
 }
 
 void validatePolicyConfig(const PolicyConfig& config)
 {
+    auto validate_clip = [](bool enabled,
+                            const std::array<double, 2>& range,
+                            const char* name) {
+        if (!enabled) {
+            return;
+        }
+        if (!std::isfinite(range[0]) ||
+            !std::isfinite(range[1]) ||
+            range[0] > range[1]) {
+            throw std::runtime_error(std::string(name) +
+                                     " must be finite [lower, upper]");
+        }
+    };
+
+    auto validate_scale = [](const auto& values, const char* name) {
+        for (double value : values) {
+            if (!std::isfinite(value)) {
+                throw std::runtime_error(std::string(name) +
+                                         " must contain finite values");
+            }
+        }
+    };
+
+    if (config.policy_step_dt_s <= 0.0 ||
+        !std::isfinite(config.policy_step_dt_s)) {
+        throw std::runtime_error("policy step_dt must be finite and > 0");
+    }
+    if (config.gait_phase_period_s <= 0.0 ||
+        !std::isfinite(config.gait_phase_period_s)) {
+        throw std::runtime_error("observations.gait_phase.params.period must be finite and > 0");
+    }
+    if (config.raw_action_clip <= 0.0 ||
+        !std::isfinite(config.raw_action_clip)) {
+        throw std::runtime_error("raw_action_clip must be finite and > 0");
+    }
+    if (!std::isfinite(config.gait_phase_stand_threshold) ||
+        !std::isfinite(config.gait_phase_move_threshold) ||
+        config.gait_phase_move_threshold <= config.gait_phase_stand_threshold) {
+        throw std::runtime_error("gait phase move threshold must be finite and > stand threshold");
+    }
+    validate_scale(config.body_ang_vel_scale, "observations.base_ang_vel.scale");
+    validate_scale(config.projected_gravity_scale,
+                   "observations.projected_gravity.scale");
+    validate_scale(config.command_scale, "observations.velocity_commands.scale");
+    validate_scale(config.gait_phase_scale, "observations.gait_phase.scale");
+    validate_scale(config.dof_pos_scale, "observations.joint_pos_rel.scale");
+    validate_scale(config.dof_vel_scale, "observations.joint_vel_rel.scale");
+    validate_scale(config.last_action_scale, "observations.last_action.scale");
+
+    validate_clip(config.base_ang_vel_clip_enabled,
+                  config.base_ang_vel_clip,
+                  "observations.base_ang_vel.clip");
+    validate_clip(config.projected_gravity_clip_enabled,
+                  config.projected_gravity_clip,
+                  "observations.projected_gravity.clip");
+    validate_clip(config.command_clip_enabled,
+                  config.command_clip,
+                  "observations.velocity_commands.clip");
+    validate_clip(config.gait_phase_clip_enabled,
+                  config.gait_phase_clip,
+                  "observations.gait_phase.clip");
+    validate_clip(config.joint_pos_rel_clip_enabled,
+                  config.joint_pos_rel_clip,
+                  "observations.joint_pos_rel.clip");
+    validate_clip(config.joint_vel_rel_clip_enabled,
+                  config.joint_vel_rel_clip,
+                  "observations.joint_vel_rel.clip");
+    validate_clip(config.last_action_clip_enabled,
+                  config.last_action_clip,
+                  "observations.last_action.clip");
+
     if (!ankleParallelMapIndicesInRange(config.left_ankle_parallel, kPolicyDof) ||
         !ankleParallelMapIndicesInRange(config.right_ankle_parallel, kPolicyDof)) {
         throw std::runtime_error("ankle parallel maps contain an out-of-range index");
@@ -1215,6 +1922,9 @@ void printUsage(const char* program)
         << "  --vx VALUE            Parsed for compatibility; runtime command starts at 0\n"
         << "  --vy VALUE            Parsed for compatibility; runtime command starts at 0\n"
         << "  --yaw-rate VALUE      Parsed for compatibility; runtime command starts at 0\n"
+        << "  --real-observation-log PATH\n"
+        << "                        Drive policy inputs from CSV policy_obs_0..N instead of MuJoCo sensors\n"
+        << "  --use-cli-command     Use --vx/--vy/--yaw-rate after policy connects\n"
         << "  --joystick            Enable joystick velocity command input\n"
         << "  --no-joystick         Disable joystick velocity command input\n"
         << "  --joystick-type VALUE Joystick layout: xbox or switch, default xbox\n"
@@ -1231,7 +1941,10 @@ void printUsage(const char* program)
         << "  --policy-hz VALUE     Optional override after deploy.yaml step_dt\n"
         << "  --stand-seconds VALUE Ready prompt delay before policy connect, default 2\n"
         << "  --duration VALUE      Stop after seconds; 0 means run until window close/Ctrl+C\n"
+        << "  --start-policy        Auto-connect policy once stand delay is reached\n"
         << "  --headless            Run without viewer\n"
+        << "  --rope                Enable elastic-rope suspension\n"
+        << "  --no-rope             Disable elastic-rope suspension\n"
         << "  --quiet               Disable per-second timing output\n"
         << "  --viewer-overlay      Enable the MuJoCo HUD overlay\n"
         << "  --no-viewer-overlay   Disable the MuJoCo HUD overlay\n"
@@ -1246,12 +1959,31 @@ void printUsage(const char* program)
         << "                        Initial curve joint index, 0..11\n"
         << "  --viewer-curve-window VALUE\n"
         << "                        Curve history window in seconds, default 5\n"
-        << "  --motor-delay        Enable delayed motor torque response\n"
-        << "  --no-motor-delay     Disable delayed motor torque response\n"
+        << "  --motor-delay        Enable delayed MIT command response\n"
+        << "  --no-motor-delay     Disable delayed MIT command response\n"
         << "  --motor-delay-min-ms VALUE\n"
         << "                        Minimum sampled motor delay in milliseconds\n"
         << "  --motor-delay-max-ms VALUE\n"
         << "                        Maximum sampled motor delay in milliseconds\n"
+        << "  --observation-delay-ms VALUE\n"
+        << "                        Delay one observation source before policy inference\n"
+        << "  --observation-delay-source VALUE\n"
+        << "                        Delayed source: imu or motor, default imu\n"
+        << "  --motor-to-model-direction VALUES\n"
+        << "                        12 comma values in motor order, each 1 or -1\n"
+        << "  --mujoco-joint-direction VALUES\n"
+        << "                        12 comma MuJoCo joint signs in motor order, each 1 or -1\n"
+        << "  --no-observation-delay\n"
+        << "                        Disable IMU/motor observation time offset\n"
+        << "  --imu-noise          Enable IMU observation noise from XML sensor noise\n"
+        << "  --no-imu-noise       Disable IMU observation noise\n"
+        << "  --joint-zero-offset-deg VALUE_OR_LIST\n"
+        << "                        Encoder zero bias in motor order; scalar or 12 comma values\n"
+        << "  --joint-zero-offset-rad VALUE_OR_LIST\n"
+        << "                        Same zero bias in radians\n"
+        << "  --log-csv PATH       Write real-robot-style tracking CSV to PATH or directory\n"
+        << "  --log-dir PATH       Write timestamped tracking CSV in directory PATH\n"
+        << "  --no-log             Disable tracking CSV output\n"
         << "  --print-config        Print resolved config and exit\n"
         << "  --help                Show this help\n\n"
         << "Keyboard:\n"
@@ -1340,6 +2072,15 @@ bool parseArgs(int argc, char** argv, RunnerOptions& options, PolicyConfig& conf
             options.command_vy = parseDouble(requireValue(i, arg), arg);
         } else if (arg == "--yaw-rate") {
             options.command_yaw_rate = parseDouble(requireValue(i, arg), arg);
+        } else if (arg == "--real-observation-log" ||
+                   arg == "--real-policy-observation-log") {
+            options.real_observation_log_path = requireValue(i, arg);
+        } else if (arg == "--use-cli-command" ||
+                   arg == "--start-with-cli-command") {
+            options.use_cli_command_on_policy_start = true;
+        } else if (arg == "--no-use-cli-command" ||
+                   arg == "--no-start-with-cli-command") {
+            options.use_cli_command_on_policy_start = false;
         } else if (arg == "--joystick") {
             options.joystick_enabled = true;
         } else if (arg == "--no-joystick") {
@@ -1364,8 +2105,16 @@ bool parseArgs(int argc, char** argv, RunnerOptions& options, PolicyConfig& conf
             options.stand_seconds = parseDouble(requireValue(i, arg), arg);
         } else if (arg == "--duration") {
             options.duration_seconds = parseDouble(requireValue(i, arg), arg);
+        } else if (arg == "--start-policy" || arg == "--auto-start-policy") {
+            options.auto_start_policy = true;
+        } else if (arg == "--no-start-policy" || arg == "--no-auto-start-policy") {
+            options.auto_start_policy = false;
         } else if (arg == "--headless") {
             options.headless = true;
+        } else if (arg == "--rope" || arg == "--elastic-rope") {
+            options.elastic_rope_enabled = true;
+        } else if (arg == "--no-rope" || arg == "--no-elastic-rope") {
+            options.elastic_rope_enabled = false;
         } else if (arg == "--quiet") {
             options.print_timing = false;
         } else if (arg == "--viewer-overlay") {
@@ -1400,6 +2149,63 @@ bool parseArgs(int argc, char** argv, RunnerOptions& options, PolicyConfig& conf
         } else if (arg == "--motor-delay-max-ms") {
             options.motor_delay_max_seconds =
                 parseDouble(requireValue(i, arg), arg) * 0.001;
+        } else if (arg == "--observation-delay" ||
+                   arg == "--sensor-time-offset") {
+            options.observation_delay_enabled = true;
+        } else if (arg == "--no-observation-delay" ||
+                   arg == "--no-sensor-time-offset") {
+            options.observation_delay_enabled = false;
+        } else if (arg == "--observation-delay-ms" ||
+                   arg == "--sensor-time-offset-ms") {
+            options.observation_delay_enabled = true;
+            options.observation_delay_seconds =
+                parseDouble(requireValue(i, arg), arg) * 0.001;
+        } else if (arg == "--observation-delay-seconds" ||
+                   arg == "--sensor-time-offset-seconds") {
+            options.observation_delay_enabled = true;
+            options.observation_delay_seconds =
+                parseDouble(requireValue(i, arg), arg);
+        } else if (arg == "--observation-delay-source" ||
+                   arg == "--delayed-observation-source") {
+            options.observation_delay_source =
+                parseObservationDelaySource(requireValue(i, arg), arg);
+        } else if (arg == "--motor-to-model-direction" ||
+                   arg == "--mujoco-motor-to-model-direction") {
+            parseIntCommaArray(requireValue(i, arg),
+                               arg,
+                               options.motor_to_model_direction);
+            options.motor_to_model_direction_override = true;
+        } else if (arg == "--mujoco-joint-direction" ||
+                   arg == "--mujoco-joint-sign") {
+            parseIntCommaArray(requireValue(i, arg),
+                               arg,
+                               options.mujoco_joint_direction);
+        } else if (arg == "--imu-noise") {
+            options.imu_noise_enabled = true;
+        } else if (arg == "--no-imu-noise") {
+            options.imu_noise_enabled = false;
+        } else if (arg == "--joint-zero-offset-deg" ||
+                   arg == "--motor-zero-offset-deg" ||
+                   arg == "--encoder-zero-offset-deg") {
+            std::array<double, kPolicyDof> values_deg{};
+            parseDoubleScalarOrCommaArray(requireValue(i, arg), arg, values_deg);
+            for (int motor_index = 0; motor_index < kPolicyDof; ++motor_index) {
+                const auto idx = static_cast<std::size_t>(motor_index);
+                options.joint_zero_offset_rad[idx] = values_deg[idx] * kDegToRad;
+            }
+        } else if (arg == "--joint-zero-offset-rad" ||
+                   arg == "--motor-zero-offset-rad" ||
+                   arg == "--encoder-zero-offset-rad") {
+            parseDoubleScalarOrCommaArray(requireValue(i, arg),
+                                          arg,
+                                          options.joint_zero_offset_rad);
+        } else if (arg == "--log-csv" || arg == "--log-dir") {
+            options.sim_log_enabled = true;
+            options.sim_log_path = requireValue(i, arg);
+        } else if (arg == "--log") {
+            options.sim_log_enabled = true;
+        } else if (arg == "--no-log") {
+            options.sim_log_enabled = false;
         } else if (arg == "--print-config") {
             options.print_config = true;
         } else {
@@ -1418,6 +2224,10 @@ bool parseArgs(int argc, char** argv, RunnerOptions& options, PolicyConfig& conf
         }
         loadDeployConfig(options.deploy_config_path, options, config);
         deploy_config_loaded = true;
+        if (options.motor_to_model_direction_override) {
+            config.motor_to_model_direction =
+                options.motor_to_model_direction;
+        }
         if (policy_hz_override) {
             options.policy_hz = policy_hz_override_value;
         }
@@ -1432,6 +2242,7 @@ bool parseArgs(int argc, char** argv, RunnerOptions& options, PolicyConfig& conf
     if (options.policy_hz <= 0.0 || !std::isfinite(options.policy_hz)) {
         throw std::runtime_error("--policy-hz must be finite and > 0");
     }
+    config.policy_step_dt_s = 1.0 / options.policy_hz;
     if (options.stand_seconds < 0.0 || !std::isfinite(options.stand_seconds)) {
         throw std::runtime_error("--stand-seconds must be finite and >= 0");
     }
@@ -1481,19 +2292,68 @@ bool parseArgs(int argc, char** argv, RunnerOptions& options, PolicyConfig& conf
     if (options.motor_delay_min_seconds > options.motor_delay_max_seconds) {
         throw std::runtime_error("motor delay min must be <= max");
     }
+    if (options.observation_delay_seconds < 0.0 ||
+        !std::isfinite(options.observation_delay_seconds)) {
+        throw std::runtime_error("--observation-delay-ms must be finite and >= 0");
+    }
+    for (double offset : options.joint_zero_offset_rad) {
+        if (!std::isfinite(offset)) {
+            throw std::runtime_error("joint zero offsets must be finite");
+        }
+    }
+    for (int direction : options.mujoco_joint_direction) {
+        if (direction != 1 && direction != -1) {
+            throw std::runtime_error("mujoco_joint_direction values must be 1 or -1");
+        }
+    }
     validatePolicyConfig(config);
     return true;
 }
 
 void printResolvedConfig(const RunnerOptions& options, const PolicyConfig& config)
 {
+    const int policy_single_observation_size =
+        config.include_gait_phase_observation
+            ? kPolicySingleObservationSizeWithGait
+            : kPolicySingleObservationSizeNoGait;
+    const int policy_observation_size =
+        policy_single_observation_size * kPolicyFrameStack;
+    std::array<double, kPolicyDof> joint_zero_offset_deg{};
+    for (int motor_index = 0; motor_index < kPolicyDof; ++motor_index) {
+        const auto idx = static_cast<std::size_t>(motor_index);
+        joint_zero_offset_deg[idx] = options.joint_zero_offset_rad[idx] / kDegToRad;
+    }
+
     std::cout << "model_xml_path=" << options.model_xml_path << "\n"
               << "runner_config_path=" << options.runner_config_path << "\n"
               << "deploy_config_path=" << options.deploy_config_path << "\n"
               << "policy_model_path=" << config.policy_model_path << "\n"
+              << "real_observation_log_path="
+              << options.real_observation_log_path << "\n"
               << "builtin_policy_defaults="
               << (P1_ENABLE_BUILTIN_POLICY_DEFAULTS ? "enabled" : "disabled") << "\n"
               << "policy_hz=" << options.policy_hz << "\n"
+              << "policy_step_dt_s=" << config.policy_step_dt_s << "\n"
+              << "gait_phase_period_s=" << config.gait_phase_period_s << "\n"
+              << "gait_phase_stand_threshold="
+              << config.gait_phase_stand_threshold << "\n"
+              << "gait_phase_move_threshold="
+              << config.gait_phase_move_threshold << "\n"
+              << "raw_action_clip=" << config.raw_action_clip << "\n"
+              << "include_gait_phase_observation="
+              << (config.include_gait_phase_observation ? "true" : "false") << "\n"
+              << "policy_single_observation_size="
+              << policy_single_observation_size << "\n"
+              << "policy_frame_stack=" << kPolicyFrameStack << "\n"
+              << "policy_observation_size=" << policy_observation_size << "\n"
+              << "auto_start_policy="
+              << (options.auto_start_policy ? "true" : "false") << "\n"
+              << "use_cli_command_on_policy_start="
+              << (options.use_cli_command_on_policy_start ? "true" : "false") << "\n"
+              << "cli_command="
+              << options.command_vx << ","
+              << options.command_vy << ","
+              << options.command_yaw_rate << "\n"
               << "joystick_enabled="
               << (options.joystick_enabled ? "true" : "false") << "\n"
               << "joystick_type=" << options.joystick_type << "\n"
@@ -1542,10 +2402,23 @@ void printResolvedConfig(const RunnerOptions& options, const PolicyConfig& confi
               << options.viewer_curve_window_seconds << "\n"
               << "motor_delay_enabled="
               << (options.motor_delay_enabled ? "true" : "false") << "\n"
-              << "motor_delay_applies=policy\n"
+              << "motor_delay_applies=mit_command\n"
               << "motor_delay_range_ms="
               << options.motor_delay_min_seconds * 1000.0 << ","
-              << options.motor_delay_max_seconds * 1000.0 << "\n";
+              << options.motor_delay_max_seconds * 1000.0 << "\n"
+              << "observation_delay_enabled="
+              << (options.observation_delay_enabled ? "true" : "false") << "\n"
+              << "observation_delay_source="
+              << observationDelaySourceName(options.observation_delay_source) << "\n"
+              << "observation_delay_ms="
+              << options.observation_delay_seconds * 1000.0 << "\n"
+              << "imu_noise_enabled="
+              << (options.imu_noise_enabled ? "true" : "false") << "\n"
+              << "sim_log_enabled="
+              << (options.sim_log_enabled ? "true" : "false") << "\n"
+              << "sim_log_path=" << options.sim_log_path << "\n";
+    printArrayLine("joint_zero_offset_rad", options.joint_zero_offset_rad);
+    printArrayLine("joint_zero_offset_deg", joint_zero_offset_deg);
     printArrayLine("control_to_motor_index", config.control_to_motor_index);
     printArrayLine("model_to_motor_index_storage", config.model_to_motor_index);
     std::cout << "model_to_motor_count=" << config.model_to_motor_count << "\n"
@@ -1560,10 +2433,37 @@ void printResolvedConfig(const RunnerOptions& options, const PolicyConfig& confi
               << config.right_ankle_parallel.upper_motor_index << ","
               << config.right_ankle_parallel.lower_motor_index << "\n";
     printArrayLine("motor_to_model_direction", config.motor_to_model_direction);
+    printArrayLine("mujoco_joint_direction", options.mujoco_joint_direction);
     printArrayLine("stand_pose_rad", config.stand_pose_rad);
     printArrayLine("joint_min_rad", config.joint_min_rad);
     printArrayLine("joint_max_rad", config.joint_max_rad);
     printArrayLine("action_scale", config.action_scale);
+    std::cout << "observation_scale_first="
+              << (config.observation_scale_first ? "true" : "false") << "\n";
+    printArrayLine("projected_gravity_scale", config.projected_gravity_scale);
+    printArrayLine("gait_phase_scale", config.gait_phase_scale);
+    printArrayLine("last_action_scale", config.last_action_scale);
+    std::cout << "base_ang_vel_clip_enabled="
+              << (config.base_ang_vel_clip_enabled ? "true" : "false") << "\n";
+    printArrayLine("base_ang_vel_clip", config.base_ang_vel_clip);
+    std::cout << "projected_gravity_clip_enabled="
+              << (config.projected_gravity_clip_enabled ? "true" : "false") << "\n";
+    printArrayLine("projected_gravity_clip", config.projected_gravity_clip);
+    std::cout << "command_clip_enabled="
+              << (config.command_clip_enabled ? "true" : "false") << "\n";
+    printArrayLine("command_clip", config.command_clip);
+    std::cout << "gait_phase_clip_enabled="
+              << (config.gait_phase_clip_enabled ? "true" : "false") << "\n";
+    printArrayLine("gait_phase_clip", config.gait_phase_clip);
+    std::cout << "joint_pos_rel_clip_enabled="
+              << (config.joint_pos_rel_clip_enabled ? "true" : "false") << "\n";
+    printArrayLine("joint_pos_rel_clip", config.joint_pos_rel_clip);
+    std::cout << "joint_vel_rel_clip_enabled="
+              << (config.joint_vel_rel_clip_enabled ? "true" : "false") << "\n";
+    printArrayLine("joint_vel_rel_clip", config.joint_vel_rel_clip);
+    std::cout << "last_action_clip_enabled="
+              << (config.last_action_clip_enabled ? "true" : "false") << "\n";
+    printArrayLine("last_action_clip", config.last_action_clip);
     printArrayLine("policy_mit_kp_model", config.policy_mit_kp_model);
     printArrayLine("policy_mit_kd_model", config.policy_mit_kd_model);
 }

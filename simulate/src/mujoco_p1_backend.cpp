@@ -12,6 +12,11 @@
 namespace p1_sim {
 namespace {
 
+constexpr std::array<double, kPolicyDof> kMotorRatedTorqueNm{{
+    43.0, 43.0, 20.0, 20.0, 10.5, 10.5,
+    43.0, 43.0, 20.0, 20.0, 10.5, 10.5,
+}};
+
 std::array<double, 3> projectedGravityFromQuat(const std::array<double, 4>& quat_wxyz)
 {
     const double w = quat_wxyz[0];
@@ -49,8 +54,9 @@ bool MujocoP1Backend::initialize()
         return false;
     }
     applied_tau_.fill(0.0);
-    delayed_torque_queue_.clear();
-    motor_delay_has_output_ = false;
+    delayed_command_queue_.clear();
+    applied_command_ = command_;
+    motor_delay_has_command_ = false;
     for (int motor_index = 0; motor_index < kPolicyDof; ++motor_index) {
         const char* name = kMotorNamesP1RealOrder[static_cast<std::size_t>(motor_index)];
         const int actuator_id = mj_name2id(model_, mjOBJ_ACTUATOR, name);
@@ -76,9 +82,15 @@ bool MujocoP1Backend::initialize()
             model_->actuator_trnid[2 * actuator_id];
     }
 
+    imu_quat_sensor_id_ = mj_name2id(model_, mjOBJ_SENSOR, "imu_quat");
+    imu_gyro_sensor_id_ = mj_name2id(model_, mjOBJ_SENSOR, "imu_gyro");
+    imu_acc_sensor_id_ = mj_name2id(model_, mjOBJ_SENSOR, "imu_acc");
     imu_quat_adr_ = sensorAddress("imu_quat");
     imu_gyro_adr_ = sensorAddress("imu_gyro");
     imu_acc_adr_ = sensorAddress("imu_acc");
+    imu_quat_noise_std_ = sensorNoiseStd(imu_quat_sensor_id_);
+    imu_gyro_noise_std_ = sensorNoiseStd(imu_gyro_sensor_id_);
+    imu_acc_noise_std_ = sensorNoiseStd(imu_acc_sensor_id_);
     root_joint_id_ = mj_name2id(model_, mjOBJ_JOINT, "root");
     if (imu_quat_adr_ < 0) {
         std::cerr << "[WARN] imu_quat sensor not found; using root qpos quaternion fallback.\n";
@@ -89,7 +101,29 @@ bool MujocoP1Backend::initialize()
     if (imu_acc_adr_ < 0) {
         std::cerr << "[WARN] imu_acc sensor not found; base linear acceleration display is zero.\n";
     }
+    std::cout << "[INFO] IMU noise stddev: enabled="
+              << (imu_noise_enabled_ ? "true" : "false")
+              << " quat=" << imu_quat_noise_std_
+              << " gyro=" << imu_gyro_noise_std_
+              << " accel=" << imu_acc_noise_std_ << "\n";
     return true;
+}
+
+void MujocoP1Backend::setImuNoiseEnabled(bool enabled)
+{
+    imu_noise_enabled_ = enabled;
+}
+
+void MujocoP1Backend::setJointZeroOffset(
+    const std::array<double, kPolicyDof>& offset_rad)
+{
+    joint_zero_offset_rad_ = offset_rad;
+}
+
+void MujocoP1Backend::setMujocoJointDirection(
+    const std::array<int, kPolicyDof>& direction)
+{
+    mujoco_joint_direction_ = direction;
 }
 
 void MujocoP1Backend::setMitTargets(const std::array<double, kPolicyDof>& q_motor_rad,
@@ -118,7 +152,11 @@ void MujocoP1Backend::setJointPositionsFromMotorTarget(
 
         const int qpos_adr = model_->jnt_qposadr[joint_id];
         const int qvel_adr = model_->jnt_dofadr[joint_id];
-        data_->qpos[qpos_adr] = q_motor_rad[static_cast<std::size_t>(motor_index)];
+        const auto idx = static_cast<std::size_t>(motor_index);
+        const double direction =
+            static_cast<double>(mujoco_joint_direction_[idx]);
+        data_->qpos[qpos_adr] =
+            direction * (q_motor_rad[idx] - joint_zero_offset_rad_[idx]);
         data_->qvel[qvel_adr] = 0.0;
     }
     mj_forward(model_, data_);
@@ -187,16 +225,16 @@ void MujocoP1Backend::setMotorDelayActive(bool active)
 
 void MujocoP1Backend::resetMotorDelay()
 {
-    delayed_torque_queue_.clear();
+    delayed_command_queue_.clear();
+    applied_command_ = command_;
     applied_tau_.fill(0.0);
-    motor_delay_has_output_ = false;
+    motor_delay_has_command_ = true;
     if (model_ && data_) {
         for (int motor_index = 0; motor_index < kPolicyDof; ++motor_index) {
             const auto idx = static_cast<std::size_t>(motor_index);
             const int actuator_id = actuator_ids_[idx];
             if (actuator_id >= 0) {
                 applied_tau_[idx] = data_->ctrl[actuator_id];
-                motor_delay_has_output_ = true;
             }
         }
     }
@@ -217,7 +255,9 @@ bool MujocoP1Backend::readState(P1StateSnapshot& state) const
 
     if (imu_quat_adr_ >= 0) {
         for (int i = 0; i < 4; ++i) {
-            state.quat[static_cast<std::size_t>(i)] = data_->sensordata[imu_quat_adr_ + i];
+            state.quat[static_cast<std::size_t>(i)] =
+                data_->sensordata[imu_quat_adr_ + i] +
+                sampleImuNoise(imu_quat_noise_std_);
         }
     } else if (root_joint_id_ >= 0) {
         const int qpos_adr = model_->jnt_qposadr[root_joint_id_];
@@ -231,14 +271,18 @@ bool MujocoP1Backend::readState(P1StateSnapshot& state) const
 
     if (imu_gyro_adr_ >= 0) {
         for (int i = 0; i < 3; ++i) {
-            state.gyro[static_cast<std::size_t>(i)] = data_->sensordata[imu_gyro_adr_ + i];
+            state.gyro[static_cast<std::size_t>(i)] =
+                data_->sensordata[imu_gyro_adr_ + i] +
+                sampleImuNoise(imu_gyro_noise_std_);
         }
     } else {
         state.gyro.fill(0.0);
     }
     if (imu_acc_adr_ >= 0) {
         for (int i = 0; i < 3; ++i) {
-            state.accel[static_cast<std::size_t>(i)] = data_->sensordata[imu_acc_adr_ + i];
+            state.accel[static_cast<std::size_t>(i)] =
+                data_->sensordata[imu_acc_adr_ + i] +
+                sampleImuNoise(imu_acc_noise_std_);
         }
     } else {
         state.accel.fill(0.0);
@@ -247,53 +291,122 @@ bool MujocoP1Backend::readState(P1StateSnapshot& state) const
     return true;
 }
 
-void MujocoP1Backend::applyMitTorques()
+bool MujocoP1Backend::applyMitTorques()
 {
     if (!model_ || !data_) {
-        return;
+        return false;
     }
 
-    std::array<double, kPolicyDof> requested_tau{};
+    const MitCommandCache* effective_command = &command_;
+    if (!motor_delay_enabled_ || !motor_delay_active_ ||
+        active_motor_delay_seconds_ <= 1e-12) {
+        delayed_command_queue_.clear();
+        applied_command_ = command_;
+        motor_delay_has_command_ = true;
+    } else {
+        if (!motor_delay_has_command_) {
+            applied_command_ = command_;
+            motor_delay_has_command_ = true;
+        }
+
+        delayed_command_queue_.push_back(
+            DelayedMitCommand{data_->time + active_motor_delay_seconds_,
+                              command_});
+        while (!delayed_command_queue_.empty() &&
+               delayed_command_queue_.front().release_time <= data_->time + 1e-12) {
+            applied_command_ = delayed_command_queue_.front().command;
+            delayed_command_queue_.pop_front();
+        }
+        effective_command = &applied_command_;
+    }
+
+    if (!computeMitTorques(*effective_command, applied_tau_)) {
+        return false;
+    }
+    return writeMotorTorques(applied_tau_);
+}
+
+bool MujocoP1Backend::computeMitTorques(
+    const MitCommandCache& command,
+    std::array<double, kPolicyDof>& requested_tau) const
+{
+    requested_tau.fill(0.0);
     for (int motor_index = 0; motor_index < kPolicyDof; ++motor_index) {
         const auto idx = static_cast<std::size_t>(motor_index);
         const int actuator_id = actuator_ids_[idx];
         const double q = readMotorPosition(motor_index);
         const double dq = readMotorVelocity(motor_index);
-        double tau = command_.tau_ff[idx] +
-                     command_.kp[idx] * (command_.q[idx] - q) +
-                     command_.kd[idx] * (command_.dq[idx] - dq);
+        const double target_q = command.q[idx];
+        const double target_dq = command.dq[idx];
+        const double kp = command.kp[idx];
+        const double kd = command.kd[idx];
+        const double tau_ff = command.tau_ff[idx];
+        if (!std::isfinite(q) || !std::isfinite(dq) ||
+            !std::isfinite(target_q) || !std::isfinite(target_dq) ||
+            !std::isfinite(kp) || !std::isfinite(kd) ||
+            !std::isfinite(tau_ff)) {
+            const char* actuator_name =
+                mj_id2name(model_, mjOBJ_ACTUATOR, actuator_id);
+            std::cerr << "[ERROR] Non-finite MIT torque input at t="
+                      << data_->time
+                      << " motor_index=" << motor_index
+                      << " actuator_id=" << actuator_id
+                      << " actuator="
+                      << (actuator_name ? actuator_name : "<unnamed>")
+                      << " q=" << q
+                      << " dq=" << dq
+                      << " target_q=" << target_q
+                      << " target_dq=" << target_dq
+                      << " kp=" << kp
+                      << " kd=" << kd
+                      << " tau_ff=" << tau_ff << "\n";
+            return false;
+        }
+
+        double tau = command.tau_ff[idx] +
+                     command.kp[idx] * (command.q[idx] - q) +
+                     command.kd[idx] * (command.dq[idx] - dq);
+        if (!std::isfinite(tau)) {
+            const char* actuator_name =
+                mj_id2name(model_, mjOBJ_ACTUATOR, actuator_id);
+            std::cerr << "[ERROR] Non-finite MIT torque at t="
+                      << data_->time
+                      << " motor_index=" << motor_index
+                      << " actuator_id=" << actuator_id
+                      << " actuator="
+                      << (actuator_name ? actuator_name : "<unnamed>")
+                      << " q=" << q
+                      << " dq=" << dq
+                      << " target_q=" << target_q
+                      << " target_dq=" << target_dq
+                      << " kp=" << kp
+                      << " kd=" << kd
+                      << " tau_ff=" << tau_ff
+                      << " tau=" << tau << "\n";
+            return false;
+        }
 
         if (model_->actuator_ctrllimited[actuator_id]) {
             const double lo = model_->actuator_ctrlrange[2 * actuator_id + 0];
             const double hi = model_->actuator_ctrlrange[2 * actuator_id + 1];
+            if (!std::isfinite(lo) || !std::isfinite(hi) || lo > hi) {
+                const char* actuator_name =
+                    mj_id2name(model_, mjOBJ_ACTUATOR, actuator_id);
+                std::cerr << "[ERROR] Invalid actuator ctrlrange at t="
+                          << data_->time
+                          << " motor_index=" << motor_index
+                          << " actuator_id=" << actuator_id
+                          << " actuator="
+                          << (actuator_name ? actuator_name : "<unnamed>")
+                          << " lo=" << lo
+                          << " hi=" << hi << "\n";
+                return false;
+            }
             tau = std::clamp(tau, lo, hi);
         }
         requested_tau[idx] = tau;
     }
-
-    if (!motor_delay_enabled_ || !motor_delay_active_ ||
-        active_motor_delay_seconds_ <= 1e-12) {
-        delayed_torque_queue_.clear();
-        applied_tau_ = requested_tau;
-        motor_delay_has_output_ = true;
-        writeMotorTorques(applied_tau_);
-        return;
-    }
-
-    if (!motor_delay_has_output_) {
-        applied_tau_ = requested_tau;
-        motor_delay_has_output_ = true;
-    }
-
-    delayed_torque_queue_.push_back(
-        DelayedTorqueCommand{data_->time + active_motor_delay_seconds_,
-                             requested_tau});
-    while (!delayed_torque_queue_.empty() &&
-           delayed_torque_queue_.front().release_time <= data_->time + 1e-12) {
-        applied_tau_ = delayed_torque_queue_.front().tau;
-        delayed_torque_queue_.pop_front();
-    }
-    writeMotorTorques(applied_tau_);
+    return true;
 }
 
 double MujocoP1Backend::controlOfMotor(int motor_index) const
@@ -305,6 +418,21 @@ double MujocoP1Backend::controlOfMotor(int motor_index) const
     return data_->ctrl[actuator_id];
 }
 
+double MujocoP1Backend::torquePermilleOfMotor(int motor_index, double torque_nm) const
+{
+    if (!model_ || motor_index < 0 || motor_index >= kPolicyDof ||
+        !std::isfinite(torque_nm)) {
+        return 0.0;
+    }
+
+    const double rated_torque_nm =
+        kMotorRatedTorqueNm[static_cast<std::size_t>(motor_index)];
+    if (!std::isfinite(rated_torque_nm) || rated_torque_nm <= 1e-9) {
+        return 0.0;
+    }
+    return 1000.0 * torque_nm / rated_torque_nm;
+}
+
 int MujocoP1Backend::sensorAddress(const std::string& name) const
 {
     const int id = mj_name2id(model_, mjOBJ_SENSOR, name.c_str());
@@ -314,7 +442,34 @@ int MujocoP1Backend::sensorAddress(const std::string& name) const
     return model_->sensor_adr[id];
 }
 
+double MujocoP1Backend::sensorNoiseStd(int sensor_id) const
+{
+    if (!model_ || sensor_id < 0 || sensor_id >= model_->nsensor) {
+        return 0.0;
+    }
+    const double stddev = model_->sensor_noise[sensor_id];
+    return std::isfinite(stddev) && stddev > 0.0 ? stddev : 0.0;
+}
+
+double MujocoP1Backend::sampleImuNoise(double stddev) const
+{
+    if (!imu_noise_enabled_ || stddev <= 0.0 || !std::isfinite(stddev)) {
+        return 0.0;
+    }
+    std::normal_distribution<double> distribution(0.0, stddev);
+    return distribution(imu_noise_rng_);
+}
+
 double MujocoP1Backend::readMotorPosition(int motor_index) const
+{
+    const auto idx = static_cast<std::size_t>(motor_index);
+    const double direction =
+        static_cast<double>(mujoco_joint_direction_[idx]);
+    return direction * readRawMotorPosition(motor_index) +
+           joint_zero_offset_rad_[idx];
+}
+
+double MujocoP1Backend::readRawMotorPosition(int motor_index) const
 {
     const auto idx = static_cast<std::size_t>(motor_index);
     const int adr = q_sensor_adr_[idx];
@@ -332,14 +487,16 @@ double MujocoP1Backend::readMotorPosition(int motor_index) const
 double MujocoP1Backend::readMotorVelocity(int motor_index) const
 {
     const auto idx = static_cast<std::size_t>(motor_index);
+    const double direction =
+        static_cast<double>(mujoco_joint_direction_[idx]);
     const int adr = dq_sensor_adr_[idx];
     if (adr >= 0) {
-        return data_->sensordata[adr];
+        return direction * data_->sensordata[adr];
     }
 
     const int joint_id = joint_ids_[idx];
     if (joint_id >= 0) {
-        return data_->qvel[model_->jnt_dofadr[joint_id]];
+        return direction * data_->qvel[model_->jnt_dofadr[joint_id]];
     }
     return 0.0;
 }
@@ -347,14 +504,16 @@ double MujocoP1Backend::readMotorVelocity(int motor_index) const
 double MujocoP1Backend::readMotorForce(int motor_index) const
 {
     const auto idx = static_cast<std::size_t>(motor_index);
+    const double direction =
+        static_cast<double>(mujoco_joint_direction_[idx]);
     const int adr = tau_sensor_adr_[idx];
     if (adr >= 0) {
-        return data_->sensordata[adr];
+        return direction * data_->sensordata[adr];
     }
 
     const int actuator_id = actuator_ids_[idx];
     if (actuator_id >= 0) {
-        return data_->actuator_force[actuator_id];
+        return direction * data_->actuator_force[actuator_id];
     }
     return 0.0;
 }
@@ -371,14 +530,28 @@ void MujocoP1Backend::sampleMotorDelay()
     active_motor_delay_seconds_ = distribution(delay_rng_);
 }
 
-void MujocoP1Backend::writeMotorTorques(
+bool MujocoP1Backend::writeMotorTorques(
     const std::array<double, kPolicyDof>& tau)
 {
     for (int motor_index = 0; motor_index < kPolicyDof; ++motor_index) {
         const auto idx = static_cast<std::size_t>(motor_index);
         const int actuator_id = actuator_ids_[idx];
-        data_->ctrl[actuator_id] = tau[idx];
+        if (!std::isfinite(tau[idx])) {
+            const char* actuator_name =
+                mj_id2name(model_, mjOBJ_ACTUATOR, actuator_id);
+            std::cerr << "[ERROR] Refusing to write non-finite MuJoCo ctrl at t="
+                      << data_->time
+                      << " motor_index=" << motor_index
+                      << " actuator_id=" << actuator_id
+                      << " actuator="
+                      << (actuator_name ? actuator_name : "<unnamed>")
+                      << " ctrl=" << tau[idx] << "\n";
+            return false;
+        }
+        data_->ctrl[actuator_id] =
+            static_cast<double>(mujoco_joint_direction_[idx]) * tau[idx];
     }
+    return true;
 }
 
 }  // namespace p1_sim

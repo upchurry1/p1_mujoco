@@ -211,7 +211,7 @@ python3 analyze_motor_log.py
 
 ## 注意事项
 
-- 当前 C++ runner 编译时使用 `POLICY_V3=0`，对应单帧 45 维观测、5 帧历史，总输入维度是 225。
+- 当前 C++ runner 使用 47 维单帧观测并堆叠 5 帧，总输入维度是 235。新增的 2 维是步态相位 `sin/cos`，位置在速度指令和关节位置观测之间。
 - TorchScript 模型必须和 deploy YAML 匹配。二者不匹配时，常见表现是 TorchScript dry-run 或推理时报矩阵维度错误。
 - `simulate/p1_mujoco_deploy.yaml` 里的模型路径和策略路径是本机运行路径，换机器后需要改成对应位置。
 - MuJoCo 日志、build 目录、电机验证结果图表默认不会提交到 Git。

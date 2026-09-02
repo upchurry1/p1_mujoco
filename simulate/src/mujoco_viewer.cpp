@@ -16,6 +16,9 @@ namespace p1_sim {
 namespace {
 
 constexpr double kRadToDeg = 57.2957795130823208768;
+constexpr int kFootSideNone = 0;
+constexpr int kFootSideLeft = 1;
+constexpr int kFootSideRight = 2;
 
 const char* overlayPageName(ViewerOverlayPage page)
 {
@@ -67,6 +70,39 @@ std::string signedFixed(double value, int precision)
 {
     std::ostringstream out;
     out << std::showpos << std::fixed << std::setprecision(precision) << value;
+    return out.str();
+}
+
+bool startsWith(const std::string& text, const char* prefix)
+{
+    return text.rfind(prefix, 0) == 0;
+}
+
+int footSideFromGeomName(const char* name)
+{
+    if (!name) {
+        return kFootSideNone;
+    }
+
+    const std::string text{name};
+    if (startsWith(text, "left_ankle_roll_link_collision_") ||
+        startsWith(text, "foot_l_")) {
+        return kFootSideLeft;
+    }
+    if (startsWith(text, "right_ankle_roll_link_collision_") ||
+        startsWith(text, "foot_r_")) {
+        return kFootSideRight;
+    }
+    return kFootSideNone;
+}
+
+std::string footStateText(bool touching, int contacts, double normal_force)
+{
+    std::ostringstream out;
+    out << (touching ? "ON" : "off")
+        << " c=" << contacts
+        << " fn=" << std::fixed << std::setprecision(1)
+        << normal_force << "N";
     return out.str();
 }
 
@@ -149,6 +185,7 @@ std::string statusText(const ViewerTelemetry& telemetry)
 
 void buildStatusOverlay(const ViewerTelemetry& telemetry,
                         const ViewerOverlayConfig& config,
+                        const ViewerFootContactTelemetry& foot_contacts,
                         std::string& left_text,
                         std::string& right_text)
 {
@@ -168,6 +205,15 @@ void buildStatusOverlay(const ViewerTelemetry& telemetry,
               std::string(telemetry.rope_enabled ? "on" : "off") +
                   " len=" + fixed(telemetry.rope_length, 3) +
                   " fz=" + signedFixed(telemetry.rope_force_z, 1));
+    appendRow(left, right, "foot contact",
+              foot_contacts.available
+                  ? "L " + footStateText(foot_contacts.left_touching,
+                                          foot_contacts.left_contacts,
+                                          foot_contacts.left_normal_force) +
+                        " / R " + footStateText(foot_contacts.right_touching,
+                                                 foot_contacts.right_contacts,
+                                                 foot_contacts.right_normal_force)
+                  : "unavailable");
     appendRow(left, right, "quat wxyz", vector4(telemetry.state.quat, 3));
     appendRow(left, right, "gyro xyz",
               vector3(telemetry.state.gyro,
@@ -431,6 +477,7 @@ bool MujocoViewer::initialize(mjModel* model,
     setFreeCamera(135.0, -18.0, 2.4);
     mjv_makeScene(model_, &scene_, 2000);
     mjr_makeContext(model_, &context_, mjFONTSCALE_150);
+    cacheFootGeomIds();
 
     glfwSetKeyCallback(window_, keyCallback);
     glfwSetCursorPosCallback(window_, mouseMoveCallback);
@@ -459,6 +506,7 @@ void MujocoViewer::renderFrame(const ViewerTelemetry* telemetry)
                     &camera_,
                     mjCAT_ALL,
                     &scene_);
+    renderFootContactVisualization();
     mjr_render(viewport, &scene_, &context_);
     if (telemetry) {
         appendCurveSample(*telemetry);
@@ -469,6 +517,196 @@ void MujocoViewer::renderFrame(const ViewerTelemetry* telemetry)
     renderOverlay(viewport, telemetry);
     glfwSwapBuffers(window_);
     glfwPollEvents();
+}
+
+void MujocoViewer::cacheFootGeomIds()
+{
+    left_foot_geom_ids_.clear();
+    right_foot_geom_ids_.clear();
+    foot_contacts_ = ViewerFootContactTelemetry{};
+
+    if (!model_) {
+        return;
+    }
+
+    for (int geom_id = 0; geom_id < model_->ngeom; ++geom_id) {
+        const int side =
+            footSideFromGeomName(mj_id2name(model_, mjOBJ_GEOM, geom_id));
+        if (side == kFootSideLeft) {
+            left_foot_geom_ids_.push_back(geom_id);
+        } else if (side == kFootSideRight) {
+            right_foot_geom_ids_.push_back(geom_id);
+        }
+    }
+
+    foot_contacts_.available =
+        !left_foot_geom_ids_.empty() || !right_foot_geom_ids_.empty();
+    if (!foot_contacts_.available) {
+        std::cerr << "[WARN] Foot contact visualization unavailable: "
+                  << "no P1 foot collision geoms were found.\n";
+        return;
+    }
+
+    std::cout << "[INFO] Foot contact visualization: left_geoms="
+              << left_foot_geom_ids_.size()
+              << " right_geoms=" << right_foot_geom_ids_.size() << ".\n";
+}
+
+int MujocoViewer::footSideForGeom(int geom_id) const
+{
+    if (std::find(left_foot_geom_ids_.begin(),
+                  left_foot_geom_ids_.end(),
+                  geom_id) != left_foot_geom_ids_.end()) {
+        return kFootSideLeft;
+    }
+    if (std::find(right_foot_geom_ids_.begin(),
+                  right_foot_geom_ids_.end(),
+                  geom_id) != right_foot_geom_ids_.end()) {
+        return kFootSideRight;
+    }
+    return kFootSideNone;
+}
+
+bool MujocoViewer::isWorldContactGeom(int geom_id) const
+{
+    if (!model_ || geom_id < 0 || geom_id >= model_->ngeom) {
+        return false;
+    }
+    if (model_->geom_bodyid[geom_id] == 0) {
+        return true;
+    }
+
+    const char* name = mj_id2name(model_, mjOBJ_GEOM, geom_id);
+    if (!name) {
+        return false;
+    }
+    const std::string text{name};
+    return text.find("ground") != std::string::npos ||
+           text.find("floor") != std::string::npos ||
+           text.find("terrain") != std::string::npos;
+}
+
+void MujocoViewer::renderFootContactVisualization()
+{
+    const bool available =
+        !left_foot_geom_ids_.empty() || !right_foot_geom_ids_.empty();
+    foot_contacts_ = ViewerFootContactTelemetry{};
+    foot_contacts_.available = available;
+    if (!available || !model_ || !data_) {
+        return;
+    }
+
+    constexpr double kContactDistanceLimit = 0.002;
+    constexpr float kLeftColor[4] = {0.20F, 0.85F, 1.00F, 0.92F};
+    constexpr float kRightColor[4] = {1.00F, 0.62F, 0.16F, 0.92F};
+
+    for (int contact_index = 0; contact_index < data_->ncon; ++contact_index) {
+        const mjContact& contact = data_->contact[contact_index];
+        const int geom0 = contact.geom[0];
+        const int geom1 = contact.geom[1];
+        const int side0 = footSideForGeom(geom0);
+        const int side1 = footSideForGeom(geom1);
+
+        int side = kFootSideNone;
+        int other_geom = -1;
+        if (side0 != kFootSideNone && side1 == kFootSideNone) {
+            side = side0;
+            other_geom = geom1;
+        } else if (side1 != kFootSideNone && side0 == kFootSideNone) {
+            side = side1;
+            other_geom = geom0;
+        }
+
+        if (side == kFootSideNone ||
+            !isWorldContactGeom(other_geom) ||
+            contact.dist > kContactDistanceLimit) {
+            continue;
+        }
+
+        mjtNum contact_force[6] = {0, 0, 0, 0, 0, 0};
+        mj_contactForce(model_, data_, contact_index, contact_force);
+        const double normal_force =
+            std::max(0.0, static_cast<double>(contact_force[0]));
+
+        mjtNum normal[3] = {contact.frame[0], contact.frame[1], contact.frame[2]};
+        const double normal_norm =
+            std::sqrt(normal[0] * normal[0] +
+                      normal[1] * normal[1] +
+                      normal[2] * normal[2]);
+        if (normal_norm > 1e-9 && std::isfinite(normal_norm)) {
+            for (mjtNum& value : normal) {
+                value /= normal_norm;
+            }
+            if (normal[2] < 0.0) {
+                for (mjtNum& value : normal) {
+                    value = -value;
+                }
+            }
+        } else {
+            normal[0] = 0.0;
+            normal[1] = 0.0;
+            normal[2] = 1.0;
+        }
+
+        const float* color =
+            side == kFootSideLeft ? kLeftColor : kRightColor;
+        addContactSphere(contact.pos, color, 0.018);
+        addContactArrow(contact.pos, normal, color, normal_force);
+
+        if (side == kFootSideLeft) {
+            foot_contacts_.left_touching = true;
+            ++foot_contacts_.left_contacts;
+            foot_contacts_.left_normal_force += normal_force;
+        } else {
+            foot_contacts_.right_touching = true;
+            ++foot_contacts_.right_contacts;
+            foot_contacts_.right_normal_force += normal_force;
+        }
+    }
+}
+
+void MujocoViewer::addContactSphere(const mjtNum pos[3],
+                                    const float rgba[4],
+                                    double radius)
+{
+    if (scene_.ngeom >= scene_.maxgeom) {
+        return;
+    }
+
+    mjtNum size[3] = {radius, radius, radius};
+    mjtNum mat[9] = {1, 0, 0,
+                     0, 1, 0,
+                     0, 0, 1};
+    mjvGeom& geom = scene_.geoms[scene_.ngeom++];
+    mjv_initGeom(&geom, mjGEOM_SPHERE, size, pos, mat, rgba);
+    geom.category = mjCAT_DECOR;
+}
+
+void MujocoViewer::addContactArrow(const mjtNum pos[3],
+                                   const mjtNum normal[3],
+                                   const float rgba[4],
+                                   double normal_force)
+{
+    if (scene_.ngeom >= scene_.maxgeom) {
+        return;
+    }
+
+    const double length = std::clamp(0.035 + 0.00045 * normal_force,
+                                     0.04,
+                                     0.16);
+    mjtNum from[3] = {pos[0], pos[1], pos[2] + 0.004};
+    mjtNum to[3] = {
+        from[0] + normal[0] * length,
+        from[1] + normal[1] * length,
+        from[2] + normal[2] * length
+    };
+
+    mjvGeom& geom = scene_.geoms[scene_.ngeom++];
+    mjv_connector(&geom, mjGEOM_ARROW, 0.006, from, to);
+    geom.category = mjCAT_DECOR;
+    for (int i = 0; i < 4; ++i) {
+        geom.rgba[i] = rgba[i];
+    }
 }
 
 void MujocoViewer::shutdown()
@@ -868,7 +1106,7 @@ void MujocoViewer::renderOverlay(const mjrRect& viewport,
 
     switch (overlay_config_.page) {
     case ViewerOverlayPage::kSummary:
-        buildStatusOverlay(*telemetry, overlay_config_, left, right);
+        buildStatusOverlay(*telemetry, overlay_config_, foot_contacts_, left, right);
         drawOverlay(mjGRID_TOPLEFT, viewport, left, right, &context_);
         buildHelpOverlay(overlay_config_, left, right);
         drawOverlay(mjGRID_BOTTOMLEFT, viewport, left, right, &context_);
@@ -886,7 +1124,7 @@ void MujocoViewer::renderOverlay(const mjrRect& viewport,
         drawOverlay(mjGRID_BOTTOMLEFT, viewport, left, right, &context_);
         break;
     case ViewerOverlayPage::kAll:
-        buildStatusOverlay(*telemetry, overlay_config_, left, right);
+        buildStatusOverlay(*telemetry, overlay_config_, foot_contacts_, left, right);
         drawOverlay(mjGRID_TOPLEFT, viewport, left, right, &context_);
         buildJointOverlay(*telemetry, overlay_config_, left, right);
         drawOverlay(mjGRID_TOPRIGHT, viewport, left, right, &context_);

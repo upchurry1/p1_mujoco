@@ -231,9 +231,10 @@ python3 analyze_motor_log.py
 
 ## Notes
 
-- The current C++ runner is compiled with `POLICY_V3=0`, which corresponds to a
-  45-dimensional single observation stacked for 5 frames, for a total policy
-  input size of 225.
+- The current C++ runner uses a 47-dimensional single observation stacked for
+  5 frames, for a total policy input size of 235. The extra 2 dimensions are
+  the gait phase `sin/cos` term inserted between velocity commands and joint
+  position observations.
 - The TorchScript model and deploy YAML must match. A mismatch usually appears
   as a TorchScript matrix shape error during load or dry run.
 - Generated logs and plots are ignored by Git. Keep exported policy weights in
